@@ -1,0 +1,5 @@
+
+# --- claude-framework ---
+.claude/state/
+.claude/settings.local.json
+CLAUDE.local.md

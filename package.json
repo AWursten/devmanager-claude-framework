@@ -1,0 +1,11 @@
+{
+  "name": "claude-framework",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The repo framework: everything a project repo needs so a Claude Code session works DevManager tasks with full discipline.",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\""
+  }
+}

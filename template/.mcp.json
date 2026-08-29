@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "devmanager": {
+      "type": "http",
+      "url": "https://devmanager.com.ar/api/mcp"
+    }
+  }
+}
