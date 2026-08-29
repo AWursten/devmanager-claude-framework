@@ -12,8 +12,8 @@ Work arrives here and nowhere else. The protocol below is not advice: follow the
 
 - nothing → call `get_work_queue` and show it, then ask which task to take. Do not pick for the person.
 - `#12` (or `12`) → work that one task. Continue at step 1.
-- `US-3` → story mode. See **Story and board modes** below.
-- `--board [--limit N]` → board mode. See **Story and board modes** below.
+- `US-3` → story mode: every pending task of that story. See **Story and board modes** below.
+- `--board [--limit N]` → board mode: the top of the queue, default **one story or five tasks, whichever comes first**. See **Story and board modes** below.
 
 The project id is in `CLAUDE.md`. Every DevManager call takes it as `project`.
 
@@ -112,7 +112,7 @@ All four, in this order:
 
 ## Story and board modes
 
-Not wired yet. Until they are, `/work US-3` and `/work --board` should say so and offer to work one task at a time.
+`/work US-3` and `/work --board [--limit N]` run the loop above once per task, and change four things about it: the planning happens for the whole batch up front, the questions are asked once, a failure blocks one task instead of stopping everything, and **the orchestrator session never implements**. Read **[orchestrator.md](./orchestrator.md)** before running either — it is short, and the differences are not guessable.
 
 ## If something goes wrong
 
