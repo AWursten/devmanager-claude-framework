@@ -1,0 +1,3 @@
+{"type":"user","uuid":"u-hi","message":{"role":"user","content":"hi"}}
+{"type":"assistant","uuid":"d1-line-0","requestId":"req_d1","timestamp":"2026-08-29T12:00:00.000Z","message":{"id":"msg_d1","type":"message","role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"…"}],"usage":{"input_tokens":1,"cache_creation_input_tokens":5,"cache_read_input_tokens":10,"output_tokens":70,"output_tokens_details":{"thinking_tokens":0},"service_tier":"standard","iterations":[{"input_tokens":1,"output_tokens":70,"cache_read_input_tokens":10,"cache_creation_input_tokens":5,"type":"message"}]}}}
+{"type":"assistant","message":{"id":"msg_d2","usa

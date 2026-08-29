@@ -1,0 +1,2 @@
+{"type":"user","uuid":"u-hello","message":{"role":"user","content":"hello"}}
+{"type":"assistant","uuid":"c1","message":{"id":"msg_c1","role":"assistant","model":"claude-opus-5","content":[]}}
