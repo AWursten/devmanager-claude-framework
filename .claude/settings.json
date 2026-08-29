@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm test:*)",
+      "Bash(node --test:*)",
+      "Bash(node init.mjs:*)",
+      "Bash(node test/fixtures/make-fixtures.mjs)",
+      "Bash(node template/.claude/hooks/capture-usage.mjs:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git blame:*)",
+      "Bash(git remote -v)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git switch -c:*)",
+      "Bash(git checkout -b:*)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(git merge:*)",
+      "Bash(npm publish:*)",
+      "Bash(npm install:*)",
+      "Bash(npm i:*)",
+      "Bash(npm ci:*)"
+    ],
+    "deny": []
+  }
+}

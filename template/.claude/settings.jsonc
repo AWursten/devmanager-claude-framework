@@ -1,0 +1,132 @@
+// The annotated twin of settings.json. Claude Code never reads this file.
+//
+// DECISION: the spec asked for a commented settings file, "JSONC if supported".
+// It is not supported anywhere: the current docs are explicit that settings
+// files are strict JSON, and that a // comment or a trailing comma makes Claude
+// Code report the file as broken at the next start. So this follows the pattern
+// the documentation itself uses for its example settings — the real file, and a
+// .jsonc beside it with a comment above every key. Edit settings.json; keep this
+// one in step, and never copy this file over it.
+//
+// Precedence, highest first: managed (organization) → `claude --settings` →
+// .claude/settings.local.json (yours, this project, gitignored) →
+// .claude/settings.json (this file's twin, shared) → ~/.claude/settings.json.
+// Anything personal goes in settings.local.json, which is already gitignored.
+//
+// One asymmetry worth knowing: `allow` rules and `additionalDirectories` only
+// take effect once each teammate trusts the folder. `deny` and `ask` apply
+// immediately, trusted or not.
+{
+  "permissions": {
+    // Things a session should never have to ask about.
+    "allow": [
+      // Read-only git. These inspect; they change nothing.
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git blame:*)",
+      "Bash(git remote -v)",
+      "Bash(git stash list)",
+
+      // Branch, stage, commit. /work opens a branch per task and commits on it,
+      // and none of that leaves the machine. What leaves the machine is
+      // `git push`, and that is in `ask` below.
+      "Bash(git switch -c:*)",
+      "Bash(git checkout -b:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+
+      // ─── ADAPT THESE FOUR TO YOUR STACK ────────────────────────────────
+      // They read npm because something had to be written here. Replace them
+      // with this project's real commands — pytest, cargo test, mvn verify,
+      // make check, whatever it is — or the implementer, reviewer and tester
+      // subagents will ask permission on every single run.
+      "Bash(npm test:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm run build:*)",
+
+      // DevManager, read-only. Every tool here only reads the board.
+      //
+      // The write tools — add_comment, log_time, start_task,
+      // submit_for_review, propose_decision, upsert_document — are deliberately
+      // NOT here. They change what the whole team sees, and the first time a
+      // session does that in a repo somebody should watch it happen. Add them
+      // once you trust the loop; that is the one change most teams make first.
+      "mcp__devmanager__whoami",
+      "mcp__devmanager__get_context",
+      "mcp__devmanager__get_project",
+      "mcp__devmanager__list_projects",
+      "mcp__devmanager__search",
+      "mcp__devmanager__list_documents",
+      "mcp__devmanager__get_document",
+      "mcp__devmanager__list_decisions",
+      "mcp__devmanager__get_decision",
+      "mcp__devmanager__get_story",
+      "mcp__devmanager__get_task",
+      "mcp__devmanager__get_work_queue",
+      "mcp__devmanager__list_my_tasks"
+    ],
+
+    // Reversible only by a person.
+    "ask": [
+      // Claude never merges (see CLAUDE.md), and pushing is the human's call.
+      "Bash(git push:*)",
+      "Bash(git merge:*)",
+
+      // A new dependency is a decision. Five flavours, because a repo picks one.
+      "Bash(npm install:*)",
+      "Bash(npm i:*)",
+      "Bash(npm ci:*)",
+      "Bash(pnpm add:*)",
+      "Bash(yarn add:*)",
+      "Bash(pip install:*)",
+
+      // Anything touching .env*, read or write. Secrets do not belong in a
+      // transcript. Tighten to `deny` if this project has real secrets on disk.
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Edit(./.env)",
+      "Edit(./.env.*)",
+      "Write(./.env)",
+      "Write(./.env.*)",
+      "Bash(cat .env*)"
+    ],
+
+    // Empty on purpose. The framework does not know what this project has to
+    // protect; projects tighten. Secrets directories and production credentials
+    // are the usual first entries.
+    "deny": []
+  },
+
+  "hooks": {
+    // The whole reason a task cannot be abandoned halfway.
+    //
+    // If .claude/state/current-task.json exists, the session is in the middle
+    // of a DevManager task and stopping would leave the board lying: a task in
+    // progress that nobody is working, with no closing comment and no time
+    // logged. The guard blocks the stop and says what closing still requires.
+    //
+    // On its way through it also writes the session's token usage to
+    // .claude/state/last-usage.json, which is where /work reads the numbers it
+    // logs — the hook is the only thing handed the transcript path.
+    //
+    // It limits itself to two refusals per task, so it can never trap a
+    // session. See the header comment in the hook itself.
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-guard.mjs\"",
+            "timeout": 30,
+            "statusMessage": "Checking the open task before stopping"
+          }
+        ]
+      }
+    ]
+  }
+}

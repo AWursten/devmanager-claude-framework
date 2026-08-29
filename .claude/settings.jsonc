@@ -1,0 +1,55 @@
+// The annotated twin of settings.json. Claude Code never reads this file — it
+// accepts nothing but strict JSON in a settings file, so the comments live in a
+// second copy. Edit settings.json; keep this one in step. `npm test` fails if
+// the two ever say different things.
+//
+// This is the framework repo's own file, not the one the template ships. It is
+// short because this repo does one thing: run Node tests with no dependencies.
+{
+  "permissions": {
+    "allow": [
+      // The whole build system: node --test, no framework, no lockfile.
+      "Bash(npm test:*)",
+      "Bash(node --test:*)",
+
+      // The three scripts this repo runs by hand, named exactly so that a typo
+      // in a fourth one still asks.
+      "Bash(node init.mjs:*)",
+      "Bash(node test/fixtures/make-fixtures.mjs)",
+      "Bash(node template/.claude/hooks/capture-usage.mjs:*)",
+
+      // Read-only git, and the three that stay on this machine.
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git blame:*)",
+      "Bash(git remote -v)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git switch -c:*)",
+      "Bash(git checkout -b:*)"
+    ],
+
+    "ask": [
+      // Anything that leaves the machine.
+      "Bash(git push:*)",
+      "Bash(git merge:*)",
+      "Bash(npm publish:*)",
+
+      // "No dependencies" is a constraint of this repo, not a preference. An
+      // install here is a decision, so it stops and asks every time.
+      "Bash(npm install:*)",
+      "Bash(npm i:*)",
+      "Bash(npm ci:*)"
+    ],
+
+    // Nothing to protect here: no secrets, no .env, no production anything.
+    "deny": []
+  }
+
+  // No hooks. The Stop guard belongs to a repo that works DevManager tasks;
+  // this one has no board and no tasks to leave half-closed.
+}
