@@ -6,7 +6,7 @@ DevManager project: `{{DEVMANAGER_PROJECT_ID}}` — the source of truth for what
 
 Work arrives as a DevManager task, through `/work`. Do not invent scope beyond the task you are working: something that needs doing and is not in a task is a task to propose, not code to write.
 
-`/work` (no argument) shows the queue. `/work #12` works one task, `/work US-3` a story, `/work --board` a bounded batch.
+`/work` (no argument) shows the queue. `/work #12` works one task, `/work US-3` a story, `/work --board` a bounded batch, `/work --phase X` or `/work --epic Y` a whole phase or epic — those two confirm the resolved scope before starting.
 
 ## Golden rules
 
@@ -23,6 +23,7 @@ Work arrives as a DevManager task, through `/work`. Do not invent scope beyond t
 
 - `/work` — the task protocol, end to end.
 - `/sync-docs` — refresh `.claude/docs/` and the managed section below from DevManager. One-way: DevManager is written in DevManager.
+- `/adopt` — run once, only when this repo is an existing codebase being brought into the methodology. If the managed section below is already synced, adoption has happened and this is not the command you want.
 
 <!-- devmanager:begin -->
 

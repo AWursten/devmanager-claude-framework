@@ -1,7 +1,7 @@
 ---
 name: work
-description: Work a DevManager task end to end — read the context, plan, ask before assuming, implement, review, test at the project's rigor level, and close the task with a comment, the time and the tokens. Use when someone asks to work a task, pick up the next task, or work a story or the board.
-argument-hint: "[#12 | US-3 | --board] [--limit N]"
+description: Work a DevManager task end to end — read the context, plan, ask before assuming, implement, review, test at the project's rigor level, and close the task with a comment, the time and the tokens. Use when someone asks to work a task, pick up the next task, or work a story, an epic, a phase or the board.
+argument-hint: "[#12 | US-3 | --board | --phase X | --epic Y] [--limit N]"
 ---
 
 # /work
@@ -12,8 +12,12 @@ Work arrives here and nowhere else. The protocol below is not advice: follow the
 
 - nothing → call `get_work_queue` and show it, then ask which task to take. Do not pick for the person.
 - `#12` (or `12`) → work that one task. Continue at step 1.
-- `US-3` → story mode: every pending task of that story. See **Story and board modes** below.
-- `--board [--limit N]` → board mode: the top of the queue, default **one story or five tasks, whichever comes first**. See **Story and board modes** below.
+- `US-3` → story mode: every pending task of that story. See **Batch modes** below.
+- `--board [--limit N]` → board mode: the top of the queue, default **one story or five tasks, whichever comes first**. See **Batch modes** below.
+- `--phase "Public site"` or `--phase 1` (1-based board position) → phase mode: every pending story of that phase, plus the phase's storyless tasks.
+- `--epic "Admin"` → epic mode: the same, for one epic.
+
+  Both resolve against `get_project` and both **stop for a confirmation of the scope** before anything happens. See **Batch modes**.
 
 The project id is in `CLAUDE.md`. Every DevManager call takes it as `project`.
 
@@ -110,9 +114,9 @@ All four, in this order:
 
 ---
 
-## Story and board modes
+## Batch modes
 
-`/work US-3` and `/work --board [--limit N]` run the loop above once per task, and change four things about it: the planning happens for the whole batch up front, the questions are asked once, a failure blocks one task instead of stopping everything, and **the orchestrator session never implements**. Read **[orchestrator.md](./orchestrator.md)** before running either — it is short, and the differences are not guessable.
+`/work US-3`, `/work --board [--limit N]`, `/work --phase X` and `/work --epic Y` run the loop above once per task, and change four things about it: the planning happens for the whole batch up front, the questions are asked once, a failure blocks one task instead of stopping everything, and **the orchestrator session never implements**. Read **[orchestrator.md](./orchestrator.md)** before running any of them — it is short, and the differences are not guessable.
 
 ## If something goes wrong
 
