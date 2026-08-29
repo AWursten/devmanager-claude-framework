@@ -1,8 +1,68 @@
 {
   "permissions": {
-    "allow": [],
-    "ask": [],
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git blame:*)",
+      "Bash(git remote -v)",
+      "Bash(git stash list)",
+      "Bash(git switch -c:*)",
+      "Bash(git checkout -b:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(npm test:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm run build:*)",
+      "mcp__devmanager__whoami",
+      "mcp__devmanager__get_context",
+      "mcp__devmanager__get_project",
+      "mcp__devmanager__list_projects",
+      "mcp__devmanager__search",
+      "mcp__devmanager__list_documents",
+      "mcp__devmanager__get_document",
+      "mcp__devmanager__list_decisions",
+      "mcp__devmanager__get_decision",
+      "mcp__devmanager__get_story",
+      "mcp__devmanager__get_task",
+      "mcp__devmanager__get_work_queue",
+      "mcp__devmanager__list_my_tasks"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(git merge:*)",
+      "Bash(npm install:*)",
+      "Bash(npm i:*)",
+      "Bash(npm ci:*)",
+      "Bash(pnpm add:*)",
+      "Bash(yarn add:*)",
+      "Bash(pip install:*)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Edit(./.env)",
+      "Edit(./.env.*)",
+      "Write(./.env)",
+      "Write(./.env.*)",
+      "Bash(cat .env*)"
+    ],
     "deny": []
   },
-  "hooks": {}
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-guard.mjs\"",
+            "timeout": 30,
+            "statusMessage": "Checking the open task before stopping"
+          }
+        ]
+      }
+    ]
+  }
 }
