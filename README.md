@@ -49,9 +49,9 @@ Everything else the framework adds lives under `.claude/`, which most repos do n
 
 A repo with history has four documents' worth of knowledge in it and no way for a session to get at it. `/adopt` is how it gets in. It runs **once**, after `init.mjs`, with a person sitting next to it, and it replaces the `/sync-docs` step above — it ends by running that itself.
 
-It reads the codebase, interviews the human about the things code cannot answer — what is in scope, which of two coexisting patterns is the blessed one, why this stack — and writes the project's Brief, Domain, Architecture and Conventions, its 3–8 founding decisions, and a backlog of what is still to do. Every write is shown and approved first.
+**The adoption protocol is not in this repo.** It is `adopt-lite`, a skill of the organization's baseline, which the DevManager connector serves as a prompt — so it is written once and updated in one place, for every project of the organization. The skill shipped here is a wrapper: it loads that protocol, follows it as written, and then adds the two steps that only mean something in a repo carrying this framework — run `/sync-docs`, and verify the template is actually applied (`init.mjs` run, hooks wired, placeholder commands replaced), reporting anything missing instead of silently patching it. If the organization's baseline has no adoption skill, `/adopt` stops and says so rather than improvising one.
 
-Three things it deliberately will not do: **rewrite history** (no finished work is backfilled as done stories — that would poison the organization's estimate calibration, which for this project correctly starts at zero), **decide alone** (a contradiction with the org's baseline conventions is a question, answered with either a project override or an alignment task), and **write without showing**. It does not touch the code either; what should change comes out as a task.
+What `adopt-lite` does, in one line: reads the codebase, interviews the human about what code cannot answer, and writes the project's documents, its founding decisions and a forward-looking backlog — showing every write before it happens. The rules it works under live in the baseline skill, which is the source; this README does not restate them.
 
 ### Options
 
@@ -81,7 +81,7 @@ CLAUDE.md                       short; read every session; has a /sync-docs-mana
     work/orchestrator.md        …and what changes for a story, the board, a phase or an epic
     work/README.md              a dry walk-through of one task, end to end
     sync-docs/SKILL.md          /sync-docs — DevManager → .claude/docs/
-    adopt/SKILL.md              /adopt — bring an existing codebase in, once
+    adopt/SKILL.md              /adopt — wrapper over the baseline's adopt-lite
   hooks/
     stop-guard.mjs              Stop hook: will not let a session end mid-task
     capture-usage.mjs           token accounting from the session transcript

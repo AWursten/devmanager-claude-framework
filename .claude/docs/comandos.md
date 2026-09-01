@@ -29,16 +29,16 @@ Para un repo que ya existe y tiene historia, `/adopt` se corre **una sola vez**,
 
 | Comando | Qué hace |
 |---|---|
-| `/adopt` | Lee el código, te entrevista sobre lo que el código no puede contestar, escribe los documentos del proyecto (Brief, Dominio, Arquitectura, Convenciones — Fases sólo si querés hoja de ruta), propone las decisiones fundacionales, y crea un backlog hacia adelante. Termina con `/sync-docs` y un resumen de traspaso. |
+| `/adopt` | Corre el protocolo canónico de adopción de la organización — la skill `adopt-lite` del baseline, que el conector de DevManager sirve como prompt — y al terminar agrega los dos pasos propios del framework: `/sync-docs` y la verificación de que el template esté aplicado (`init.mjs` hecho, hooks activos). |
 
-Sentate al lado: **la entrevista es el paso que decide si los documentos son verdad**. El código dice qué hay; no dice por qué, ni qué está en alcance, ni qué quedó a medio hacer y se abandonó. Sin humano en la sesión, `/adopt` se frena.
+**El protocolo no vive en este repo.** Vive en el baseline de la organización, una sola vez, y así se actualiza en un solo lugar para todos los proyectos. La skill del repo es un envoltorio: apunta al protocolo y lo sigue tal cual. Si el baseline de la organización no tiene skill de adopción, `/adopt` se frena y te lo dice, en vez de improvisar una versión propia.
 
-Qué **no** va a hacer, aunque parezca cómodo:
+Qué hace `adopt-lite`, en corto: lee el código, te entrevista sobre lo que el código no puede contestar, escribe los documentos del proyecto, propone las decisiones fundacionales y crea un backlog hacia adelante, mostrando cada escritura antes de mandarla. **Sentate al lado: la entrevista es el paso que decide si los documentos son verdad.** El detalle fino —qué pregunta, qué no hace, qué pasa si te vas a la mitad— está en la skill del baseline, que es la fuente; leelo ahí y no acá, para que no haya dos versiones que se contradigan.
 
-- **No reescribe historia.** Nada del trabajo ya terminado entra al tablero como historia hecha. Un tablero poblado de mentiras arruina la calibración de estimaciones de toda la organización; la de este proyecto arranca en cero y así está bien.
-- **No decide solo.** Dos patrones que conviven, una contradicción con las convenciones de la organización, un módulo que no se sabe si sigue vivo: todo eso te lo pregunta. Ante una contradicción con la baseline, elegís vos: override del proyecto (queda escrito en Convenciones) o tarea de alineación en el backlog.
-- **No escribe sin mostrar.** Cada documento, cada decisión y el backlog entero (`dry-run` primero) se muestran en la sesión y esperan tu OK antes de llegar a DevManager.
-- **No toca el código.** Documentar no es refactorizar. Lo que habría que cambiar sale como tarea.
+Los dos pasos que agrega el framework al final:
+
+1. **`/sync-docs`**, para que el repo tenga la copia generada de lo que se acaba de escribir en DevManager.
+2. **Verificar el template**: id del proyecto en `CLAUDE.md` y sección administrada llena, `.mcp.json` apuntando a DevManager, el hook `Stop` conectado a `stop-guard.mjs`, skills y agentes en su lugar, `.gitignore` con el bloque del framework, y los comandos de test/lint/typecheck/build de `settings.json` cambiados por los de este proyecto. Lo que falte sale nombrado en el traspaso, no parcheado en silencio.
 
 Las decisiones quedan *propuestas* hasta que un ADMIN las acepte. Después de `/adopt`, el proyecto se trabaja como cualquier otro: `/work`.
 
