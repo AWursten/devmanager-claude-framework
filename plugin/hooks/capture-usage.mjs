@@ -1,11 +1,11 @@
 // capture-usage.mjs — how many tokens this session spent, from its transcript.
 //
-// Not a hook of its own: `stop-guard.mjs` calls it, writes the result to
-// `~/.claude/devmanager-state/<project-id>/last-usage.json`, and the `work`
-// skill logs those numbers with the task's time. It is also runnable by hand for
-// debugging, from wherever the plugin is installed:
+// Two callers. `stop-guard.mjs` imports it and writes the result next to the
+// open task, in `~/.claude/devmanager-state/<project-id>/<task-number>/`. And the
+// `work` skill runs it at a task's close, through the launcher that
+// `session-start.mjs` leaves at `~/.claude/devmanager-state/capture-usage.mjs`:
 //
-//     node <plugin>/hooks/capture-usage.mjs <transcript.jsonl>
+//     node ~/.claude/devmanager-state/capture-usage.mjs --since <ISO> [<transcript.jsonl>]
 //
 // VERIFIED against a real transcript (Claude Code 2.x) rather than assumed:
 //
@@ -210,8 +210,25 @@ export function projectSlug(cwd) {
   return cwd.replace(/[^a-zA-Z0-9]/g, "-");
 }
 
-/** The most recently modified session transcript for a working directory, or null. */
+/**
+ * The most recently modified session transcript for a working directory, or
+ * null. Claude Code files a session under the directory it STARTED in, and the
+ * shell that runs this may have moved into a subdirectory since — so the search
+ * walks up from `cwd` and stops at the nearest directory that has transcripts.
+ */
 export function findLatestTranscript({ cwd = process.cwd(), home = os.homedir() } = {}) {
+  let dir = path.resolve(cwd);
+  for (;;) {
+    const found = latestIn(dir, home);
+    if (found) return found;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/** The newest transcript filed under exactly this directory, or null. */
+function latestIn(cwd, home) {
   const candidates = new Set([projectSlug(cwd), projectSlug(cwd.toLowerCase())]);
   let best = null;
 

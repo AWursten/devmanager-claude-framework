@@ -98,8 +98,11 @@ function subdirs(dir) {
  * way to tell it from one open in another repository on the same machine, and
  * blocking the wrong session is worse than not blocking.
  *
- * With more than one match (two tasks open in the same repository) the most
- * recently started wins, so the guard still names one task instead of none.
+ * With more than one match, the task whose repository is the DEEPEST one around
+ * `cwd` wins: a worktree that lives inside its main checkout matches both, and
+ * it is the worktree's own task that is this session's. Between tasks of the
+ * same repository, the most recently started wins, so the guard still names one
+ * task instead of none.
  */
 export function findOpenTask(root, cwd) {
   if (!cwd) return null;
@@ -109,8 +112,11 @@ export function findOpenTask(root, cwd) {
     for (const dir of subdirs(projectDir)) {
       const task = readState(dir, CURRENT_TASK);
       if (!task || typeof task.cwd !== "string" || !isInside(cwd, task.cwd)) continue;
+      const depth = path.resolve(task.cwd).length;
       const started = Date.parse(task.startedAt) || 0;
-      if (!best || started > best.started) best = { dir, task, started };
+      if (!best || depth > best.depth || (depth === best.depth && started > best.started)) {
+        best = { dir, task, depth, started };
+      }
     }
   }
   return best ? { dir: best.dir, task: best.task } : null;

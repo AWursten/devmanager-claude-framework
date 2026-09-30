@@ -49,7 +49,8 @@ export function blockReason(currentTask, dir) {
     "  1. Documentation check — read the project's documents against what you built, fix what the",
     "     work made false (upsert_document), and keep the result for docs_check.",
     "  2. add_comment — what was done, decisions taken, deviations from the plan, what to verify.",
-    `  3. log_time — the minutes, plus the tokens from ${dir ? path.join(dir, "last-usage.json") : "last-usage.json"}, source: "AI".`,
+    '  3. log_time — the minutes, and the tokens that `node ~/.claude/devmanager-state/capture-usage.mjs --since <startedAt>`',
+    '     prints under logTime (null or an error: log the time without tokens), source: "AI".',
     "  4. submit_for_review with docs_check — the state transition. Never complete_task unless the",
     "     project has no review column and the human said to close fully.",
     `  5. Delete ${file}.`,
@@ -57,8 +58,8 @@ export function blockReason(currentTask, dir) {
     "If the task cannot be finished, that is also a close: say why in a comment, log the time spent,",
     "leave the task where it belongs, and delete the state file. What is not allowed is silence.",
     "",
-    "If this session is not the one working that task, say so and stop again: the guard steps aside",
-    `after ${MAX_BLOCKS} refusals.`,
+    "If you are only waiting for the person's answer, or this session is not the one working that task,",
+    `say so and stop again: the guard steps aside after ${MAX_BLOCKS} refusals.`,
   ].join("\n");
 }
 

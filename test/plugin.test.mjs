@@ -422,7 +422,7 @@ describe("session-start: the launcher", () => {
     assert.match(source, /main\(\);/);
   });
 
-  test("the launcher runs, and prints JSON (null when this machine has no transcript for the cwd)", () => {
+  test("the launcher runs and prints the capture of the transcript it is given", () => {
     const root = scratch("cf-state-");
     const file = ensureLauncher({ env: { DEVMANAGER_STATE_DIR: root } });
     const result = spawnSync(process.execPath, [file, path.join(FIXTURES, "transcript-basic.jsonl")], {
@@ -451,5 +451,99 @@ describe("session-start: the launcher", () => {
     ensureLauncher({ env: { DEVMANAGER_STATE_DIR: root } });
     assert.equal(findOpenTask(root, repo).task.task, "#12");
     assert.ok(readdirSync(root).includes(LAUNCHER));
+  });
+});
+
+describe("finding the session's transcript from where the shell is", () => {
+  /** A fake home with one session filed under `sessionDir`, the way Claude Code files it. */
+  function homeWithSession(sessionDir) {
+    const home = scratch("cf-home-");
+    const slug = sessionDir.replace(/[^a-zA-Z0-9]/g, "-");
+    const dir = path.join(home, ".claude", "projects", slug);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "sess.jsonl"), readFileSync(path.join(FIXTURES, "transcript-basic.jsonl")));
+    return home;
+  }
+
+  test("from a subdirectory, it walks up to the directory the session started in", () => {
+    const repo = scratch("cf-repo-");
+    const home = homeWithSession(repo);
+    const logged = [];
+    const original = console.log;
+    console.log = (value) => logged.push(value);
+    try {
+      captureMain(["--since", "2026-08-29T00:00:00.000Z"], { cwd: path.join(repo, "src", "deep"), home });
+    } finally {
+      console.log = original;
+    }
+    assert.equal(JSON.parse(logged[0]).logTime.tokensOut, 900);
+  });
+
+  test("with no session anywhere above, it is null — never a guess", () => {
+    const logged = [];
+    const original = console.log;
+    console.log = (value) => logged.push(value);
+    try {
+      captureMain([], { cwd: scratch("cf-nowhere-"), home: scratch("cf-home-") });
+    } finally {
+      console.log = original;
+    }
+    assert.equal(JSON.parse(logged[0]), null);
+  });
+});
+
+describe("a worktree inside its main checkout", () => {
+  test("the session in the nested worktree gets the worktree's task, not the outer one's", () => {
+    const { root, repo } = world();
+    const nested = path.join(repo, ".claude", "worktrees", "feature");
+    mkdirSync(nested, { recursive: true });
+    // The outer task started later: depth, not recency, decides.
+    writeState(path.join(root, "proj1", "12"), CURRENT_TASK, {
+      project: "proj1",
+      task: "#12",
+      startedAt: "2026-09-30T15:00:00.000Z",
+      cwd: repo,
+    });
+    writeState(path.join(root, "proj1", "13"), CURRENT_TASK, {
+      project: "proj1",
+      task: "#13",
+      startedAt: "2026-09-30T09:00:00.000Z",
+      cwd: nested,
+    });
+
+    assert.equal(findOpenTask(root, path.join(nested, "src")).task.task, "#13");
+    assert.equal(findOpenTask(root, path.join(repo, "src")).task.task, "#12");
+  });
+});
+
+describe("session-start as Claude Code runs it", () => {
+  function spawnStart(file, root) {
+    return spawnSync(process.execPath, [file], {
+      input: "{}",
+      env: { ...process.env, DEVMANAGER_STATE_DIR: root },
+      encoding: "utf8",
+    });
+  }
+
+  test("writes the launcher through the real entry point, printing nothing", () => {
+    const root = scratch("cf-state-");
+    const result = spawnStart(path.join(PLUGIN, "hooks", "session-start.mjs"), root);
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, "");
+    assert.ok(existsSync(path.join(root, LAUNCHER)));
+  });
+
+  test("and through a symlinked plugin too", (t) => {
+    const root = scratch("cf-state-");
+    const link = path.join(scratch("cf-link-"), "plugin");
+    try {
+      symlinkSync(PLUGIN, link, "junction");
+    } catch {
+      t.skip("cannot create a symlink here");
+      return;
+    }
+    const result = spawnStart(path.join(link, "hooks", "session-start.mjs"), root);
+    assert.equal(result.status, 0);
+    assert.ok(existsSync(path.join(root, LAUNCHER)), "a linked plugin must still leave the launcher");
   });
 });
