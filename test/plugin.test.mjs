@@ -1627,15 +1627,23 @@ describe("the Stop hook's reason reads right with whatever current-task.json car
       const text = reason({ ...TASK, task });
       assert.match(text, /^A DevManager task is still open — /, JSON.stringify(task));
       assert.doesNotMatch(text, /Task (undefined|null|the open task)/);
+      assert.match(text, /--task <n>`\n.*\n\s+Replace <n> with the task's number before running it\./, JSON.stringify(task));
+      const unstarted = reason({ ...TASK, task, startedAt: "12" });
+      assert.match(unstarted, /--task <n>`\.\n\s+Replace <n> with the task's number before running it\./, JSON.stringify(task));
     }
+    // With a number there is nothing to replace, so nothing is said about it.
+    assert.doesNotMatch(reason(TASK), /Replace <n>/);
+    assert.doesNotMatch(reason({ ...TASK, startedAt: "12" }), /Replace <n>/);
   });
 
   test("with a start the counter would refuse, it offers no command that fails: time without tokens", () => {
     for (const startedAt of ["12", "yesterday", "2026-09-30", undefined]) {
       const text = reason({ ...TASK, startedAt });
       assert.match(text, /no tokens: the task's start \(startedAt in the/, String(startedAt));
-      assert.doesNotMatch(text, new RegExp(`--since ${startedAt}\b`), String(startedAt));
+      assert.doesNotMatch(text, new RegExp(`--since ${startedAt}\\b`), String(startedAt));
       assert.match(text, /Only if the\s+person confirms when the task started/);
+      assert.match(text, /without it the counter cannot tell this task's share/);
+      assert.doesNotMatch(text, /does not count without one/);
       assert.match(text, /--since <that start, as 2026-09-30T13:00:00\.000Z> --task 12`/);
     }
   });

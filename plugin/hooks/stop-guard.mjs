@@ -62,20 +62,25 @@ export function taskKey(currentTask) {
  * start is one the counter accepts: a command that exits 1 is not advice.
  */
 function logTimeStep(currentTask) {
-  const task = parseTaskNumber(String(currentTask?.task)) ?? "<n>";
+  const number = parseTaskNumber(String(currentTask?.task));
+  const task = number ?? "<n>";
+  // Pasted as it is, `<n>` is a shell redirection: say what goes there.
+  const placeholder = number === null ? ["     Replace <n> with the task's number before running it."] : [];
   const counter = "node ~/.claude/devmanager-state/capture-usage.mjs";
   if (isIsoInstant(currentTask?.startedAt)) {
     return [
       "  3. log_time — the minutes, and the tokens that",
       `     \`${counter} --since ${currentTask.startedAt} --task ${task}\``,
       '     prints under logTime (null or an error: log the time without tokens), source: "AI".',
+      ...placeholder,
     ];
   }
   return [
     '  3. log_time — the minutes, source: "AI", and no tokens: the task\'s start (startedAt in the',
-    "     file above) cannot be read, and the token counter does not count without one. Only if the",
-    "     person confirms when the task started, count from then instead:",
+    "     file above) cannot be read, and without it the counter cannot tell this task's share.",
+    "     Only if the person confirms when the task started, count from then instead:",
     `     \`${counter} --since <that start, as 2026-09-30T13:00:00.000Z> --task ${task}\`.`,
+    ...placeholder,
   ];
 }
 
