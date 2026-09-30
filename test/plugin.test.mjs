@@ -44,6 +44,7 @@ import {
   findSessionTranscript,
   main as captureMain,
   parseArgs,
+  isIsoInstant,
   parseTaskNumber,
   taskOfDescription,
 } from "../plugin/hooks/capture-usage.mjs";
@@ -1334,6 +1335,44 @@ describe("tokens by task: each subagent counts for the task on its label", () =>
     assert.equal(captureUsage(file, { since: START_12 }).tokensOut, 10 + 31 + 32 + 33 + 34 + 35 + 36);
   });
 
+  test("isIsoInstant takes a date with its time and zone, and nothing Date.parse merely guesses at", () => {
+    for (const good of [START_12, "2026-09-30T13:00:00Z", "2026-09-30T13:00Z", "2026-09-30T10:00:00-03:00", "2024-02-29T00:00:00Z"]) {
+      assert.equal(isIsoInstant(good), true, good);
+    }
+    for (const bad of ["12", "1", "0", "2026", "hello 5", "", "2026-09-30", "2026-09-30T13:00:00", "2026-09-30 13:00:00Z",
+      "2026-02-30T00:00:00Z", "2025-02-29T00:00:00Z", "2026-13-01T00:00:00Z", "2026-09-30T25:00:00Z", undefined, 12]) {
+      assert.equal(isIsoInstant(bad), false, JSON.stringify(bad));
+    }
+  });
+
+  test("a subagent transcript that cannot be read is listed as unreadable with a task, and skipped without one", () => {
+    const file = session([{ id: "ok", meta: { description: "#12 implementer" }, out: 200 }]);
+    const sub = path.join(path.dirname(file), "s", "subagents");
+    // A folder named like a transcript: listed, and reading it fails.
+    mkdirSync(path.join(sub, "agent-gone.jsonl"));
+    writeFileSync(path.join(sub, "agent-gone.meta.json"), JSON.stringify({ description: "#12 tester", agentType: "devmanager:tester" }));
+
+    const usage = captureUsage(file, { since: START_12, task: 12 });
+    assert.equal(usage.tokensOut, 10 + 200);
+    assert.deepEqual(usage.excludedSources, [
+      {
+        source: "agent-gone",
+        description: "#12 tester",
+        agentType: "devmanager:tester",
+        reason: "unreadable",
+        tokensIn: 0,
+        tokensOut: 0,
+        tokensCacheRead: 0,
+        tokensCacheWrite: 0,
+        messages: 0,
+      },
+    ]);
+
+    const plain = captureUsage(file);
+    assert.equal(plain.tokensOut, 10 + 200);
+    assert.equal("excludedSources" in plain, false);
+  });
+
   test("parseTaskNumber takes 12 and #12, and nothing else", () => {
     assert.equal(parseTaskNumber("12"), 12);
     assert.equal(parseTaskNumber("#12"), 12);
@@ -1353,6 +1392,16 @@ describe("tokens by task: each subagent counts for the task on its label", () =>
       ["--since", START_12, "--task", "12", "--task", "13", BATCH],
       ["--since", "nope", BATCH],
       ["--since", "", BATCH],
+      // Date.parse reads these as 2001: a cut there would charge the task the whole session.
+      ["--since", "12", "--task", "12", BATCH],
+      ["--since", "hello 5", "--task", "12", BATCH],
+      ["--since", "2026", "--task", "12", BATCH],
+      ["--since", "0", BATCH],
+      ["--since", "2026-09-30", "--task", "12", BATCH],
+      ["--since", "2026-09-30T13:00:00", "--task", "12", BATCH],
+      ["--since", "2026-02-30T13:00:00.000Z", "--task", "12", BATCH],
+      ["--since", START_12, "--since", START_12, "--task", "12", BATCH],
+      ["--since", START_12, "--since", "2026-09-30T14:00:00.000Z", BATCH],
       [BATCH, "--since"],
       ["--since"],
     ];
@@ -1421,5 +1470,37 @@ describe("tokens by task: each subagent counts for the task on its label", () =>
     assert.equal("task" in usage, false);
     assert.equal(usage.tokensOut, 60 + 500 + 700);
     assert.match(result.reason, /--task <n>/);
+  });
+});
+
+describe("the Stop hook with a start that is not an ISO instant", () => {
+  test("counts without the number, as before: Date.parse reads 12 as 2001, so the whole session", async () => {
+    const { root, repo, dir, task } = world();
+    writeState(dir, CURRENT_TASK, { ...task, startedAt: "12" });
+
+    await run({
+      stdin: Readable.from([JSON.stringify({ cwd: repo, transcript_path: path.join(FIXTURES, "session-batch.jsonl") })]),
+      env: { DEVMANAGER_STATE_DIR: root },
+    });
+
+    const usage = readState(dir, LAST_USAGE);
+    assert.equal("task" in usage, false, "no --task on a start that is not a real one");
+    assert.equal(usage.tokensOut, 40 + 60 + 300 + 310 + 500 + 700);
+  });
+
+  test("and with no start at all, the whole session, without the number", async () => {
+    const { root, repo, dir, task } = world();
+    const { startedAt, ...unstarted } = task;
+    writeState(dir, CURRENT_TASK, unstarted);
+
+    await run({
+      stdin: Readable.from([JSON.stringify({ cwd: repo, transcript_path: path.join(FIXTURES, "session-batch.jsonl") })]),
+      env: { DEVMANAGER_STATE_DIR: root },
+    });
+
+    const usage = readState(dir, LAST_USAGE);
+    assert.equal("task" in usage, false);
+    assert.equal(usage.since, null);
+    assert.equal(usage.tokensOut, 40 + 60 + 300 + 310 + 500 + 700);
   });
 });

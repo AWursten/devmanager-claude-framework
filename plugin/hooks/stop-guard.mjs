@@ -11,6 +11,9 @@
 // tokens spent since the task started next to it, in `last-usage.json` — a
 // fallback record; the close itself measures them with the launcher. Both count
 // by the task's number from `current-task.json` (`"task": "#12"`), as `--task`.
+// When that file's number does not parse, or its `startedAt` is not an ISO
+// instant, the hook counts without the number, as before: by the hour from a
+// `startedAt` that `Date.parse` still reads, and the whole session without one.
 //
 // A Stop fires at the end of EVERY turn, not only when the session ends, and a
 // turn that ends asking the person something is waiting, not leaving. So a last
@@ -38,7 +41,7 @@ import {
   writeState,
   readHookInput,
 } from "./lib/state.mjs";
-import { captureUsage, parseTaskNumber } from "./capture-usage.mjs";
+import { captureUsage, isIsoInstant, parseTaskNumber } from "./capture-usage.mjs";
 
 export const MAX_BLOCKS = 2;
 export const BLOCK_WINDOW_MS = 30 * 60 * 1000;
@@ -161,7 +164,7 @@ export async function run({ stdin = process.stdin, env = process.env } = {}) {
     // start, and another task's subagents do not although they ran after it.
     // A task file whose number or start does not parse is counted as before:
     // by the hour, or the whole session.
-    const started = !Number.isNaN(Date.parse(open.task.startedAt));
+    const started = isIsoInstant(open.task.startedAt);
     const task = (started && parseTaskNumber(String(open.task.task))) || undefined;
     const usage = captureUsage(input.transcript_path, { since: open.task.startedAt, task });
     if (usage) writeState(open.dir, LAST_USAGE, { ...usage, sessionId: input.session_id ?? null });

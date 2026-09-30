@@ -16,9 +16,11 @@
 // are left out and listed under `excludedSources`, never attributed by the
 // hour. That is how a planner that ran before the task began is charged to it,
 // and a reviewer of another task that ran inside its window is not. `--task`
-// without `--since`, either of them malformed, missing its value, or `--task`
-// given twice, exits 1 with the reason on stderr and nothing on stdout. Without
-// either option the whole session counts, as before.
+// without `--since`, either of them malformed (`--since` is an ISO date with
+// its time and zone), missing its value, or given twice, exits 1 with the
+// reason on stderr and nothing on stdout. A subagent transcript that cannot be
+// read is listed with `--task` as `unreadable`, and skipped without it, as
+// before. Without either option the whole session counts, as before.
 //
 // VERIFIED against a real transcript (Claude Code 2.x) rather than assumed:
 //
@@ -173,6 +175,21 @@ function mergeInto(target, other) {
 
 // ─── Which task a subagent worked for ────────────────────────────────────────
 
+/** Date, `T`, time and zone: the shape of `startedAt`. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Whether a value is an ISO 8601 instant that names a real moment. `Date.parse`
+ * alone is not the test: V8 reads `"12"` as December 2001 and `"hello 5"` as
+ * May 2001, and a cut there would charge a task the whole session. It also
+ * rolls `02-30` over into March, so the day is checked against its month.
+ */
+export function isIsoInstant(value) {
+  if (typeof value !== "string" || !ISO_INSTANT.test(value) || Number.isNaN(Date.parse(value))) return false;
+  const [year, month, day] = value.slice(0, 10).split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day)).getUTCDate() === day;
+}
+
 /** A task number as the command line takes it: `12` or `#12`, a positive integer. */
 export function parseTaskNumber(value) {
   if (typeof value !== "string") return null;
@@ -254,13 +271,13 @@ export function attributeSubagent(dir, source) {
  *
  * With `task` (a number), only the session's own transcript is cut by `since`;
  * a subagent counts in full when `attributeSubagent` gives it that task, and is
- * listed in `excludedSources` otherwise. `task` needs a `since` that parses:
+ * listed in `excludedSources` otherwise. `task` needs a `since` that is an ISO instant:
  * without one the session's share cannot be told apart, and the answer is null.
  */
 export function captureUsage(transcriptPath, { includeSubagents = true, since, task } = {}) {
   if (!transcriptPath || !existsSync(transcriptPath)) return null;
   const byTask = task !== undefined && task !== null;
-  if (byTask && (!Number.isSafeInteger(task) || task <= 0 || Number.isNaN(Date.parse(since)))) return null;
+  if (byTask && (!Number.isSafeInteger(task) || task <= 0 || !isIsoInstant(since))) return null;
 
   let result = null;
   try {
@@ -281,14 +298,23 @@ export function captureUsage(transcriptPath, { includeSubagents = true, since, t
     for (const file of files) {
       const label = path.basename(file, ".jsonl");
       let part = null;
+      let unreadable = false;
       try {
         part = summarize(parseTranscript(readFileSync(path.join(dir, file), "utf8")), label, byTask ? {} : { since });
       } catch {
-        continue;
+        // Without a task it is skipped, as before; with one it is listed, so a
+        // subagent of the task that could not be read does not vanish unseen.
+        if (!byTask) continue;
+        unreadable = true;
       }
 
       if (byTask) {
         const { task: labelled, ...who } = attributeSubagent(dir, label);
+        if (unreadable) {
+          const { reason, at, inheritedFrom, ...described } = who;
+          excludedSources.push({ source: label, ...described, reason: "unreadable", ...EMPTY() });
+          continue;
+        }
         if (labelled !== task) {
           const reason = labelled === undefined ? {} : { reason: "other-task", task: labelled };
           const totals = part ? part.bySource[label] : EMPTY();
@@ -459,8 +485,8 @@ export function captureCurrentUsage(options = {}) {
 
 /**
  * The command line's arguments: `{ since, task, given }`, or `{ error }` with
- * the reason it cannot run. A value that is missing, malformed or, for
- * `--task`, given twice is an error, and so is `--task` without `--since`: a
+ * the reason it cannot run. A value that is missing or malformed, or an
+ * option given twice, is an error, and so is `--task` without `--since`: a
  * count taken from a guess would be logged as if it were the task's.
  */
 export function parseArgs(argv) {
@@ -471,8 +497,11 @@ export function parseArgs(argv) {
     const arg = argv[i];
     if (arg === "--since") {
       if (i + 1 >= argv.length) return { error: "--since needs a value: the task's start, as an ISO date" };
+      if (since !== undefined) return { error: "--since is given more than once" };
       since = argv[++i];
-      if (Number.isNaN(Date.parse(since))) return { error: `--since ${JSON.stringify(since)} is not a date` };
+      if (!isIsoInstant(since)) {
+        return { error: `--since ${JSON.stringify(since)} is not an ISO date with its time and zone, as 2026-09-30T13:00:00.000Z` };
+      }
     } else if (arg === "--task") {
       if (task !== undefined) return { error: "--task is given more than once" };
       if (i + 1 >= argv.length) return { error: "--task needs a value: the task's number, as 12 or #12" };
