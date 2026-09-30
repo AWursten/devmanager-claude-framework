@@ -1,6 +1,9 @@
 {
   "name": "claude-framework",
-  "owner": { "name": "Codefy" },
+  "owner": {
+    "name": "Codefy"
+  },
+  "description": "The DevManager plugin for Claude Code: the machine-side half of working DevManager tasks.",
   "plugins": [
     {
       "name": "devmanager",
