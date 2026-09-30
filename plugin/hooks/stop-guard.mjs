@@ -9,7 +9,8 @@
 // documentation check, no closing comment and no time logged. So the guard
 // blocks the stop with the list of what closing still requires, and writes the
 // tokens spent since the task started next to it, in `last-usage.json` — a
-// fallback record; the close itself measures them with the launcher.
+// fallback record; the close itself measures them with the launcher. Both count
+// by the task's number from `current-task.json` (`"task": "#12"`), as `--task`.
 //
 // A Stop fires at the end of EVERY turn, not only when the session ends, and a
 // turn that ends asking the person something is waiting, not leaving. So a last
@@ -37,7 +38,7 @@ import {
   writeState,
   readHookInput,
 } from "./lib/state.mjs";
-import { captureUsage } from "./capture-usage.mjs";
+import { captureUsage, parseTaskNumber } from "./capture-usage.mjs";
 
 export const MAX_BLOCKS = 2;
 export const BLOCK_WINDOW_MS = 30 * 60 * 1000;
@@ -56,6 +57,8 @@ export function taskKey(currentTask) {
 export function blockReason(currentTask, dir) {
   const number = currentTask?.task ?? "the open task";
   const file = dir ? path.join(dir, "current-task.json") : "current-task.json";
+  const since = currentTask?.startedAt ?? "<startedAt>";
+  const task = parseTaskNumber(String(currentTask?.task)) ?? "<n>";
   return [
     `Task ${number} is still open — ${file} exists, so this session has not closed it.`,
     "",
@@ -63,7 +66,8 @@ export function blockReason(currentTask, dir) {
     "  1. Documentation check — read the project's documents against what you built, fix what the",
     "     work made false (upsert_document), and keep the result for docs_check.",
     "  2. add_comment — what was done, decisions taken, deviations from the plan, what to verify.",
-    `  3. log_time — the minutes, and the tokens that \`node ~/.claude/devmanager-state/capture-usage.mjs --since ${currentTask?.startedAt ?? "<startedAt>"}\``,
+    "  3. log_time — the minutes, and the tokens that",
+    `     \`node ~/.claude/devmanager-state/capture-usage.mjs --since ${since} --task ${task}\``,
     '     prints under logTime (null or an error: log the time without tokens), source: "AI".',
     "  4. submit_for_review with docs_check — the state transition. Never complete_task unless the",
     "     project has no review column and the human said to close fully.",
@@ -153,7 +157,13 @@ export async function run({ stdin = process.stdin, env = process.env } = {}) {
   if (open) {
     // From the task's start, not the session's: a session that worked two
     // tasks must not log the first one's tokens against the second.
-    const usage = captureUsage(input.transcript_path, { since: open.task.startedAt });
+    // And by its number, so its planner counts although it ran before the
+    // start, and another task's subagents do not although they ran after it.
+    // A task file whose number or start does not parse is counted as before:
+    // by the hour, or the whole session.
+    const started = !Number.isNaN(Date.parse(open.task.startedAt));
+    const task = (started && parseTaskNumber(String(open.task.task))) || undefined;
+    const usage = captureUsage(input.transcript_path, { since: open.task.startedAt, task });
     if (usage) writeState(open.dir, LAST_USAGE, { ...usage, sessionId: input.session_id ?? null });
   }
 

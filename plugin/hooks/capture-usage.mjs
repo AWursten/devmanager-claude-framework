@@ -5,7 +5,20 @@
 // `work` skill runs it at a task's close, through the launcher that
 // `session-start.mjs` leaves at `~/.claude/devmanager-state/capture-usage.mjs`:
 //
-//     node ~/.claude/devmanager-state/capture-usage.mjs --since <ISO> [<transcript.jsonl>]
+//     node ~/.claude/devmanager-state/capture-usage.mjs --since <ISO> [--task <n>] [<transcript.jsonl>]
+//
+// `--since` is the task's start: the session's own transcript counts from then
+// up to the moment of the count, there is no end to the window, and so, without
+// `--task`, does every subagent's. `--task` (`12` or `#12`)
+// changes how subagents are chosen, and only that: each one counts in full, at
+// any hour, when the description it was launched with starts with `#<n>` — its
+// own, or, for a subagent launched by another, the nearest ancestor's. The rest
+// are left out and listed under `excludedSources`, never attributed by the
+// hour. That is how a planner that ran before the task began is charged to it,
+// and a reviewer of another task that ran inside its window is not. `--task`
+// without `--since`, either of them malformed, missing its value, or `--task`
+// given twice, exits 1 with the reason on stderr and nothing on stdout. Without
+// either option the whole session counts, as before.
 //
 // VERIFIED against a real transcript (Claude Code 2.x) rather than assumed:
 //
@@ -31,6 +44,13 @@
 //     everything to subagents, so a total that ignored them would be a small
 //     fraction of the truth. They are summed in, and kept separately per source
 //     so a batch can attribute them.
+//   - Beside each `agent-<id>.jsonl` is an `agent-<id>.meta.json` with the
+//     `agentType` and the `description` it was launched with. A subagent
+//     launched by another one (`spawnDepth` 2) lands in the same flat folder,
+//     with no `description` and a `parentAgentId` naming its parent's `<id>`.
+//   - The session's transcript does not repeat what its subagents spent: it has
+//     no sidechain lines and shares no `message.id` with them. Cutting it by
+//     `--since` while counting a subagent in full counts nothing twice.
 //
 // If usage cannot be derived, this returns null. `work` then logs time without
 // tokens: an absent number is honest, an invented one is not.
@@ -151,12 +171,96 @@ function mergeInto(target, other) {
   return target;
 }
 
+// ─── Which task a subagent worked for ────────────────────────────────────────
+
+/** A task number as the command line takes it: `12` or `#12`, a positive integer. */
+export function parseTaskNumber(value) {
+  if (typeof value !== "string") return null;
+  const match = /^#?(\d+)$/.exec(value);
+  if (!match) return null;
+  const number = Number(match[1]);
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
+}
+
+/**
+ * The task a description is labelled with, or null: `#<n>` at its start, with
+ * no digit after it — so `#6` is not `#67 planner`, and `#12:` or `#12-x` is 12.
+ */
+export function taskOfDescription(description) {
+  if (typeof description !== "string") return null;
+  const match = /^#(\d+)(?!\d)/.exec(description.trim());
+  return match ? Number(match[1]) : null;
+}
+
+/** An agent id as Claude Code writes it, checked before it becomes part of a path. */
+const AGENT_ID = /^[A-Za-z0-9_-]+$/;
+
+/** A subagent's `.meta.json`: `{ meta }`, or `{ error }` when it is missing or is not a JSON object. */
+function readMeta(dir, source) {
+  let text;
+  try {
+    text = readFileSync(path.join(dir, `${source}.meta.json`), "utf8");
+  } catch {
+    return { error: "meta-missing" };
+  }
+  try {
+    const meta = JSON.parse(text);
+    if (meta && typeof meta === "object" && !Array.isArray(meta)) return { meta };
+  } catch {}
+  return { error: "meta-corrupt" };
+}
+
+const stringOrNull = (value) => (typeof value === "string" ? value : null);
+
+/**
+ * The task a subagent's transcript belongs to, by its label alone and never by
+ * the hour. Its own `description` decides when it carries `#<n>`; otherwise
+ * the search climbs `parentAgentId` until one does. Returns `{ task }`, plus
+ * `inheritedFrom` when an ancestor decided it, or `{ reason }`, plus `at` when
+ * the chain broke at an ancestor. A chain that comes back to itself stops as
+ * `cycle`. `description` and `agentType` are always the source's own.
+ */
+export function attributeSubagent(dir, source) {
+  const own = readMeta(dir, source);
+  const found = {
+    description: stringOrNull(own.meta?.description),
+    agentType: stringOrNull(own.meta?.agentType),
+  };
+  const seen = new Set();
+  let current = source;
+  let read = own;
+
+  for (;;) {
+    seen.add(current);
+    const at = current === source ? {} : { at: current };
+    if (read.error) return { ...found, reason: read.error, ...at };
+
+    const task = taskOfDescription(read.meta.description);
+    if (task !== null) return { ...found, task, ...(current === source ? {} : { inheritedFrom: current }) };
+
+    const parent = read.meta.parentAgentId;
+    if (parent === undefined || parent === null) return { ...found, reason: "unlabeled", ...at };
+    if (typeof parent !== "string" || !AGENT_ID.test(parent)) return { ...found, reason: "meta-corrupt", ...at };
+
+    current = `agent-${parent}`;
+    if (seen.has(current)) return { ...found, reason: "cycle", at: current };
+    read = readMeta(dir, current);
+  }
+}
+
 /**
  * Total usage for a session: its own transcript plus, unless asked otherwise,
  * every subagent transcript beside it. Returns null when nothing is derivable.
+ *
+ * With `task` (a number), only the session's own transcript is cut by `since`;
+ * a subagent counts in full when `attributeSubagent` gives it that task, and is
+ * listed in `excludedSources` otherwise. `task` needs a `since` that parses:
+ * without one the session's share cannot be told apart, and the answer is null.
  */
-export function captureUsage(transcriptPath, { includeSubagents = true, since } = {}) {
+export function captureUsage(transcriptPath, { includeSubagents = true, since, task } = {}) {
   if (!transcriptPath || !existsSync(transcriptPath)) return null;
+  const byTask = task !== undefined && task !== null;
+  if (byTask && (!Number.isSafeInteger(task) || task <= 0 || Number.isNaN(Date.parse(since)))) return null;
 
   let result = null;
   try {
@@ -165,6 +269,7 @@ export function captureUsage(transcriptPath, { includeSubagents = true, since } 
     return null;
   }
 
+  const excludedSources = [];
   if (includeSubagents) {
     const dir = subagentDir(transcriptPath);
     let files = [];
@@ -174,20 +279,33 @@ export function captureUsage(transcriptPath, { includeSubagents = true, since } 
       files = [];
     }
     for (const file of files) {
+      const label = path.basename(file, ".jsonl");
       let part = null;
       try {
-        const label = path.basename(file, ".jsonl");
-        part = summarize(parseTranscript(readFileSync(path.join(dir, file), "utf8")), label, { since });
+        part = summarize(parseTranscript(readFileSync(path.join(dir, file), "utf8")), label, byTask ? {} : { since });
       } catch {
         continue;
       }
+
+      if (byTask) {
+        const { task: labelled, ...who } = attributeSubagent(dir, label);
+        if (labelled !== task) {
+          const reason = labelled === undefined ? {} : { reason: "other-task", task: labelled };
+          const totals = part ? part.bySource[label] : EMPTY();
+          excludedSources.push({ source: label, ...who, ...reason, ...totals });
+          continue;
+        }
+        if (part) Object.assign(part.bySource[label], who);
+      }
+
       if (!part) continue;
       result = result ? mergeInto(result, part) : part;
     }
   }
 
   if (!result) return null;
-  return { ...result, since: since ?? null, transcript: transcriptPath, capturedAt: new Date().toISOString() };
+  const extra = byTask ? { task, excludedSources } : {};
+  return { ...result, since: since ?? null, ...extra, transcript: transcriptPath, capturedAt: new Date().toISOString() };
 }
 
 /**
@@ -340,23 +458,57 @@ export function captureCurrentUsage(options = {}) {
 }
 
 /**
- * The command line: `[--since <ISO>] [<transcript.jsonl>]`. Prints the capture
- * and, under `logTime`, the same numbers in the shape `log_time` takes — or
- * `null` when nothing is derivable, which is the cue to log time without tokens.
+ * The command line's arguments: `{ since, task, given }`, or `{ error }` with
+ * the reason it cannot run. A value that is missing, malformed or, for
+ * `--task`, given twice is an error, and so is `--task` without `--since`: a
+ * count taken from a guess would be logged as if it were the task's.
+ */
+export function parseArgs(argv) {
+  let since;
+  let task;
+  let given;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--since") {
+      if (i + 1 >= argv.length) return { error: "--since needs a value: the task's start, as an ISO date" };
+      since = argv[++i];
+      if (Number.isNaN(Date.parse(since))) return { error: `--since ${JSON.stringify(since)} is not a date` };
+    } else if (arg === "--task") {
+      if (task !== undefined) return { error: "--task is given more than once" };
+      if (i + 1 >= argv.length) return { error: "--task needs a value: the task's number, as 12 or #12" };
+      const value = argv[++i];
+      task = parseTaskNumber(value);
+      if (task === null) return { error: `--task ${JSON.stringify(value)} is not a task number: use 12 or #12` };
+    } else {
+      given = arg;
+    }
+  }
+  if (task !== undefined && since === undefined) return { error: "--task needs --since: the task's start" };
+  return { since, task, given };
+}
+
+/**
+ * The command line: `--since <ISO> [--task <n>] [<transcript.jsonl>]`, where
+ * `--since` may be left out only without `--task`, to count the whole session.
+ * Prints the capture and, under `logTime`, the same numbers in the shape
+ * `log_time` takes — or `null` when nothing is derivable, which is the cue to
+ * log time without tokens. Arguments it cannot use print nothing on stdout,
+ * the reason on stderr, and set the exit code to 1.
  *
  * Exported because the `work` skill does not run this file directly: it runs
  * the launcher the SessionStart hook leaves in the state folder, which imports
  * this and calls it. The plugin's install path is not something a session knows.
- * `options` takes `env` (by default `process.env`), `home` and `cwd`.
+ * `options` takes `env` (by default `process.env`), `home`, `cwd` and `stderr`.
  */
-export function main(argv = process.argv.slice(2), { env = process.env, ...options } = {}) {
-  let since;
-  let given;
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--since") since = argv[++i];
-    else given = argv[i];
+export function main(argv = process.argv.slice(2), { env = process.env, stderr = process.stderr, ...options } = {}) {
+  const args = parseArgs(argv);
+  if (args.error) {
+    stderr.write(`capture-usage: ${args.error}\n`);
+    process.exitCode = 1;
+    return null;
   }
-  const usage = given ? captureUsage(given, { since }) : captureCurrentUsage({ ...options, env, since });
+  const { since, task, given } = args;
+  const usage = given ? captureUsage(given, { since, task }) : captureCurrentUsage({ ...options, env, since, task });
   const out = usage ? { ...usage, logTime: toLogTimeTokens(usage) } : null;
   console.log(JSON.stringify(out, null, 2));
   return out;

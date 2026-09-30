@@ -153,4 +153,33 @@ write("session-partial-output.jsonl", [
   ...assistant({ id: "n1", model: "claude-opus-5", blocks: 2, partial: [10], output: 60, input: 2, cacheRead: 500, cacheWrite: 100 }),
 ]);
 
+/** A subagent's `.meta.json`, in the shape Claude Code writes beside its transcript. */
+function meta(name, fields) {
+  mkdirSync(path.dirname(path.join(HERE, name)), { recursive: true });
+  writeFileSync(path.join(HERE, name), JSON.stringify({ ...fields, requestShape: "background", requestNonInteractive: true }));
+}
+
+/** A subagent of the batch: its transcript in the current format, and its meta. */
+function subagent(id, { description, agentType, at, output }) {
+  write(`session-batch/subagents/agent-${id}.jsonl`, [
+    ...assistant({ id, model: "claude-opus-5", blocks: 2, partial: [8], output, input: 1, cacheRead: 100, cacheWrite: 10, timestamps: [at, at] }),
+  ]);
+  meta(`session-batch/subagents/agent-${id}.meta.json`, { agentType, description, toolUseId: `toolu_${id}`, spawnDepth: 1 });
+}
+
+// A batch of #12 and #13, the way `work-batch` runs it: both planners first,
+// then #12 starts at 13:00 and #13 at 14:00 — but #13's reviewer ran inside
+// #12's window. Truth, `--task 12 --since 13:00`: main 60 (its 12:00 message is
+// before the start), planner 300 and implementer 500 of #12, in full; #13's
+// planner (310) and reviewer (700) left out.
+subagent("a12plan", { description: "#12 planner", agentType: "devmanager:planner", at: "2026-09-30T12:01:00.000Z", output: 300 });
+subagent("a13plan", { description: "#13 planner", agentType: "devmanager:planner", at: "2026-09-30T12:02:00.000Z", output: 310 });
+subagent("a12impl", { description: "#12 implementer", agentType: "devmanager:implementer", at: "2026-09-30T13:10:00.000Z", output: 500 });
+subagent("a13rev", { description: "#13 reviewer", agentType: "devmanager:reviewer", at: "2026-09-30T13:20:00.000Z", output: 700 });
+write("session-batch.jsonl", [
+  user("/work-batch #12 #13"),
+  ...assistant({ id: "q1", model: "claude-opus-5", blocks: 2, partial: [4], output: 40, input: 2, cacheRead: 500, cacheWrite: 100, timestamps: ["2026-09-30T12:00:00.000Z", "2026-09-30T12:00:01.000Z"] }),
+  ...assistant({ id: "q2", model: "claude-opus-5", blocks: 2, partial: [5], output: 60, input: 2, cacheRead: 500, cacheWrite: 100, timestamps: ["2026-09-30T13:05:00.000Z", "2026-09-30T13:05:01.000Z"] }),
+]);
+
 console.log("fixtures written");

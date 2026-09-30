@@ -16,6 +16,7 @@ import {
   existsSync,
   writeFileSync,
   symlinkSync,
+  cpSync,
   utimesSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -42,6 +43,9 @@ import {
   summarize,
   findSessionTranscript,
   main as captureMain,
+  parseArgs,
+  parseTaskNumber,
+  taskOfDescription,
 } from "../plugin/hooks/capture-usage.mjs";
 import { ensureLauncher, launcherSource, LAUNCHER } from "../plugin/hooks/session-start.mjs";
 
@@ -1080,5 +1084,342 @@ describe("the token counter reads the session it runs in", () => {
     const env = { CLAUDE_CODE_SESSION_ID: OLDER };
     assert.equal(findSessionTranscript({ env, home, cwd: repo }), older);
     assert.equal(capture(["--since", SINCE], { env, home, cwd: repo }), null);
+  });
+});
+
+describe("tokens by task: each subagent counts for the task on its label", () => {
+  const BATCH = path.join(FIXTURES, "session-batch.jsonl");
+  const START_12 = "2026-09-30T13:00:00.000Z";
+  const CLI = path.join(PLUGIN, "hooks", "capture-usage.mjs");
+
+  /** process.env without the session id, so nothing but the arguments decides what is read. */
+  function cleanEnv(extra = {}) {
+    const env = { ...process.env, ...extra };
+    if (!("CLAUDE_CODE_SESSION_ID" in extra)) delete env.CLAUDE_CODE_SESSION_ID;
+    return env;
+  }
+
+  /** The command line as a process: its exit code, stdout and stderr. */
+  function cli(file, argv, env = cleanEnv()) {
+    const result = spawnSync(process.execPath, [file, ...argv], { env, encoding: "utf8" });
+    return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  /** One assistant message of `out` output tokens, streamed over two lines at `at`. */
+  const lines = (id, out, at = "2026-09-30T12:30:00.000Z") =>
+    [8, out]
+      .map((o, i) =>
+        JSON.stringify({
+          type: "assistant",
+          uuid: `${id}-${i}`,
+          requestId: `req_${id}`,
+          timestamp: at,
+          message: {
+            id: `msg_${id}`,
+            model: "claude-opus-5",
+            usage: { input_tokens: 1, output_tokens: o, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+          },
+        }),
+      )
+      .join("\n") + "\n";
+
+  /**
+   * A session on disk: a main transcript with one message of 10 after START_12,
+   * and one subagent per entry. An object `meta` is written as JSON, a string
+   * raw, and none at all leaves the subagent without one.
+   */
+  function session(agents) {
+    const dir = scratch("cf-batch-");
+    const main = path.join(dir, "s.jsonl");
+    writeFileSync(main, lines("main", 10, "2026-09-30T13:30:00.000Z"));
+    const sub = path.join(dir, "s", "subagents");
+    mkdirSync(sub, { recursive: true });
+    for (const { id, meta, out, at } of agents) {
+      writeFileSync(path.join(sub, `agent-${id}.jsonl`), lines(id, out, at));
+      if (meta !== undefined) {
+        writeFileSync(path.join(sub, `agent-${id}.meta.json`), typeof meta === "string" ? meta : JSON.stringify(meta));
+      }
+    }
+    return main;
+  }
+
+  const excluded = (usage) => Object.fromEntries(usage.excludedSources.map((e) => [e.source, e]));
+
+  test("the batch: #12 gets its planner, which ran before it started, and not #13's reviewer, which ran inside its window", () => {
+    const usage = captureUsage(BATCH, { since: START_12, task: 12 });
+    assert.equal(usage.task, 12);
+    assert.equal(usage.since, START_12);
+    assert.deepEqual(Object.keys(usage.bySource).sort(), ["agent-a12impl", "agent-a12plan", "main"]);
+    assert.equal(usage.bySource.main.tokensOut, 60, "the session's own message before the start stays out");
+    assert.equal(usage.bySource["agent-a12plan"].tokensOut, 300);
+    assert.equal(usage.bySource["agent-a12impl"].tokensOut, 500);
+    assert.equal(usage.tokensOut, 860);
+    assert.equal(usage.messages, 3);
+    assert.equal(usage.bySource["agent-a12plan"].description, "#12 planner");
+    assert.equal(usage.bySource["agent-a12plan"].agentType, "devmanager:planner");
+    assert.equal(usage.bySource["agent-a12impl"].agentType, "devmanager:implementer");
+
+    const out = excluded(usage);
+    assert.deepEqual(Object.keys(out).sort(), ["agent-a13plan", "agent-a13rev"]);
+    assert.equal(out["agent-a13rev"].reason, "other-task");
+    assert.equal(out["agent-a13rev"].task, 13);
+    assert.equal(out["agent-a13rev"].description, "#13 reviewer");
+    assert.equal(out["agent-a13rev"].agentType, "devmanager:reviewer");
+    assert.equal(out["agent-a13rev"].tokensOut, 700, "listed with what it spent, in full");
+    assert.equal(out["agent-a13plan"].tokensOut, 310);
+  });
+
+  test("the other task of the batch: #13 gets both of its subagents, and nothing of the session before it", () => {
+    const usage = captureUsage(BATCH, { since: "2026-09-30T14:00:00.000Z", task: 13 });
+    assert.equal(usage.bySource.main, undefined);
+    assert.equal(usage.tokensOut, 310 + 700);
+    assert.deepEqual(usage.excludedSources.map((e) => e.source), ["agent-a12impl", "agent-a12plan"]);
+  });
+
+  test("without a task, the batch counts by the hour exactly as before, with no new fields", () => {
+    const windowed = captureUsage(BATCH, { since: START_12 });
+    assert.equal(windowed.tokensOut, 60 + 500 + 700);
+    assert.deepEqual(Object.keys(windowed.bySource).sort(), ["agent-a12impl", "agent-a13rev", "main"]);
+    assert.equal("task" in windowed, false);
+    assert.equal("excludedSources" in windowed, false);
+    assert.deepEqual(Object.keys(windowed.bySource["agent-a13rev"]).sort(), [
+      "messages",
+      "tokensCacheRead",
+      "tokensCacheWrite",
+      "tokensIn",
+      "tokensOut",
+    ]);
+    assert.equal(captureUsage(BATCH).tokensOut, 40 + 60 + 300 + 310 + 500 + 700);
+  });
+
+  test("a task without a since that parses is null on the API: the session's share cannot be told apart", () => {
+    assert.equal(captureUsage(BATCH, { task: 12 }), null);
+    assert.equal(captureUsage(BATCH, { since: "nope", task: 12 }), null);
+  });
+
+  test("the command line: --task 12 and --task #12 print the same, and excludedSources stays out of logTime", () => {
+    for (const task of ["12", "#12"]) {
+      const result = cli(CLI, ["--since", START_12, "--task", task, BATCH]);
+      assert.equal(result.status, 0, result.stderr);
+      const out = JSON.parse(result.stdout);
+      assert.equal(out.task, 12);
+      assert.equal(out.tokensOut, 860);
+      assert.equal(out.logTime.tokensOut, 860);
+      assert.deepEqual(out.excludedSources.map((e) => e.source), ["agent-a13plan", "agent-a13rev"]);
+      assert.equal("excludedSources" in out.logTime.usageJson, false);
+      assert.equal(out.logTime.usageJson.bySource["agent-a12plan"].description, "#12 planner");
+    }
+  });
+
+  test("the label is #<n> at the start, with no digit after it", () => {
+    assert.equal(taskOfDescription("#67 planner"), 67);
+    assert.notEqual(taskOfDescription("#67 planner"), 6);
+    assert.equal(taskOfDescription("#12: planner"), 12);
+    assert.equal(taskOfDescription("#12-x"), 12);
+    assert.equal(taskOfDescription("  #12 planner"), 12);
+    assert.equal(taskOfDescription("planner #12"), null);
+    assert.equal(taskOfDescription("12 planner"), null);
+    assert.equal(taskOfDescription(12), null);
+
+    const file = session([
+      { id: "one", meta: { description: "#1 planner" }, out: 101 },
+      { id: "long", meta: { description: "#123 planner" }, out: 102 },
+      { id: "colon", meta: { description: "#12: planner" }, out: 103 },
+      { id: "dash", meta: { description: "#12-x" }, out: 104 },
+      { id: "space", meta: { description: "  #12 planner" }, out: 105 },
+      { id: "bare", meta: { description: "#12" }, out: 106 },
+      { id: "late", meta: { description: "planner #12" }, out: 107 },
+    ]);
+    const usage = captureUsage(file, { since: START_12, task: 12 });
+    assert.deepEqual(Object.keys(usage.bySource).sort(), ["agent-bare", "agent-colon", "agent-dash", "agent-space", "main"]);
+    assert.equal(usage.tokensOut, 10 + 103 + 104 + 105 + 106);
+    const out = excluded(usage);
+    assert.equal(out["agent-one"].reason, "other-task");
+    assert.equal(out["agent-one"].task, 1);
+    assert.equal(out["agent-long"].task, 123);
+    assert.equal(out["agent-late"].reason, "unlabeled");
+  });
+
+  test("a subagent launched by another inherits its parent's task, through any depth", () => {
+    const file = session([
+      { id: "p", meta: { agentType: "devmanager:implementer", description: "#12 implementer", spawnDepth: 1 }, out: 200 },
+      { id: "c", meta: { agentType: "general-purpose", parentAgentId: "p", spawnDepth: 2 }, out: 30 },
+      { id: "g", meta: { agentType: "Explore", parentAgentId: "c", spawnDepth: 3 }, out: 4 },
+    ]);
+    const usage = captureUsage(file, { since: START_12, task: 12 });
+    assert.equal(usage.tokensOut, 10 + 200 + 30 + 4);
+    assert.equal(usage.bySource["agent-c"].inheritedFrom, "agent-p");
+    assert.equal(usage.bySource["agent-g"].inheritedFrom, "agent-p");
+    assert.equal(usage.bySource["agent-c"].description, null, "its own description, which it has none of");
+    assert.equal(usage.bySource["agent-c"].agentType, "general-purpose");
+    assert.equal("inheritedFrom" in usage.bySource["agent-p"], false);
+    assert.deepEqual(usage.excludedSources, []);
+  });
+
+  test("a subagent with a label of its own keeps it over its parent's, both ways", () => {
+    const file = session([
+      { id: "p12", meta: { description: "#12 implementer" }, out: 200 },
+      { id: "c13", meta: { description: "#13 helper", parentAgentId: "p12", spawnDepth: 2 }, out: 30 },
+      { id: "p13", meta: { description: "#13 implementer" }, out: 300 },
+      { id: "c12", meta: { description: "#12 helper", parentAgentId: "p13", spawnDepth: 2 }, out: 40 },
+    ]);
+    const usage = captureUsage(file, { since: START_12, task: 12 });
+    assert.deepEqual(Object.keys(usage.bySource).sort(), ["agent-c12", "agent-p12", "main"]);
+    assert.equal("inheritedFrom" in usage.bySource["agent-c12"], false);
+    const out = excluded(usage);
+    assert.equal(out["agent-c13"].reason, "other-task");
+    assert.equal(out["agent-c13"].task, 13);
+  });
+
+  test("a cycle in parentAgentId stops, and leaves the subagents in it out", () => {
+    const file = session([
+      { id: "a", meta: { parentAgentId: "b", spawnDepth: 2 }, out: 11 },
+      { id: "b", meta: { parentAgentId: "a", spawnDepth: 2 }, out: 12 },
+      { id: "self", meta: { parentAgentId: "self", spawnDepth: 2 }, out: 13 },
+    ]);
+    const usage = captureUsage(file, { since: START_12, task: 12 });
+    assert.equal(usage.tokensOut, 10);
+    const out = excluded(usage);
+    assert.equal(out["agent-a"].reason, "cycle");
+    assert.equal(out["agent-b"].reason, "cycle");
+    assert.equal(out["agent-self"].reason, "cycle");
+    assert.equal(out["agent-self"].at, "agent-self");
+  });
+
+  test("a parent whose meta is missing, corrupt or unlabelled leaves its child out, and says where the chain broke", () => {
+    const file = session([
+      { id: "orphan", meta: { parentAgentId: "ghost", spawnDepth: 2 }, out: 21 },
+      { id: "broken", meta: "{not json", out: 22 },
+      { id: "child", meta: { parentAgentId: "broken", spawnDepth: 2 }, out: 23 },
+      { id: "plain", meta: { description: "look around" }, out: 24 },
+      { id: "kid", meta: { parentAgentId: "plain", spawnDepth: 2 }, out: 25 },
+      { id: "climber", meta: { parentAgentId: "../x", spawnDepth: 2 }, out: 26 },
+    ]);
+    const usage = captureUsage(file, { since: START_12, task: 12 });
+    assert.equal(usage.tokensOut, 10);
+    const out = excluded(usage);
+    assert.deepEqual([out["agent-orphan"].reason, out["agent-orphan"].at], ["meta-missing", "agent-ghost"]);
+    assert.deepEqual([out["agent-child"].reason, out["agent-child"].at], ["meta-corrupt", "agent-broken"]);
+    assert.deepEqual([out["agent-kid"].reason, out["agent-kid"].at], ["unlabeled", "agent-plain"]);
+    assert.equal(out["agent-climber"].reason, "meta-corrupt", "a parent id that could walk a path is not followed");
+    assert.equal(out["agent-kid"].tokensOut, 25);
+  });
+
+  test("a subagent that cannot be attributed is left out even inside the window: never by the hour", () => {
+    const inside = "2026-09-30T13:30:00.000Z";
+    const file = session([
+      { id: "nometa", out: 31, at: inside },
+      { id: "corrupt", meta: "{not json", out: 32, at: inside },
+      { id: "array", meta: "[]", out: 33, at: inside },
+      { id: "null", meta: "null", out: 34, at: inside },
+      { id: "number", meta: { description: 12, agentType: 7 }, out: 35, at: inside },
+      { id: "nolabel", meta: { description: "planner", agentType: "devmanager:planner" }, out: 36, at: inside },
+    ]);
+    const usage = captureUsage(file, { since: START_12, task: 12 });
+    assert.deepEqual(Object.keys(usage.bySource), ["main"]);
+    assert.equal(usage.tokensOut, 10);
+    const out = excluded(usage);
+    assert.equal(out["agent-nometa"].reason, "meta-missing");
+    assert.equal(out["agent-corrupt"].reason, "meta-corrupt");
+    assert.equal(out["agent-array"].reason, "meta-corrupt");
+    assert.equal(out["agent-null"].reason, "meta-corrupt");
+    assert.equal(out["agent-number"].reason, "unlabeled");
+    assert.equal(out["agent-number"].description, null);
+    assert.equal(out["agent-number"].agentType, null);
+    assert.equal(out["agent-nolabel"].reason, "unlabeled");
+    assert.equal(out["agent-nolabel"].agentType, "devmanager:planner");
+    assert.equal(out["agent-nometa"].tokensOut, 31);
+
+    // The same session without a task takes them all, by the hour, as before.
+    assert.equal(captureUsage(file, { since: START_12 }).tokensOut, 10 + 31 + 32 + 33 + 34 + 35 + 36);
+  });
+
+  test("parseTaskNumber takes 12 and #12, and nothing else", () => {
+    assert.equal(parseTaskNumber("12"), 12);
+    assert.equal(parseTaskNumber("#12"), 12);
+    for (const bad of ["abc", "0", "#0", "-3", "", "#", "12x", "1.5", " 12", "##12", undefined, 12]) {
+      assert.equal(parseTaskNumber(bad), null, JSON.stringify(bad));
+    }
+  });
+
+  test("the command line refuses what it cannot count: exit 1, the reason on stderr, nothing on stdout", () => {
+    const cases = [
+      ["--task", "12", BATCH],
+      ["--task", "abc", "--since", START_12, BATCH],
+      ["--task", "0", "--since", START_12, BATCH],
+      ["--task", "-3", "--since", START_12, BATCH],
+      ["--since", START_12, BATCH, "--task"],
+      ["--since", START_12, "--task", "12", "--task", "12", BATCH],
+      ["--since", START_12, "--task", "12", "--task", "13", BATCH],
+      ["--since", "nope", BATCH],
+      ["--since", "", BATCH],
+      [BATCH, "--since"],
+      ["--since"],
+    ];
+    for (const argv of cases) {
+      const result = cli(CLI, argv);
+      assert.equal(result.status, 1, argv.join(" "));
+      assert.equal(result.stdout, "", argv.join(" "));
+      assert.match(result.stderr, /^capture-usage: .*--(task|since)/, argv.join(" "));
+    }
+    assert.deepEqual(parseArgs(["--since", START_12, "--task", "#12", BATCH]), { since: START_12, task: 12, given: BATCH });
+    assert.match(parseArgs(["--task", "12"]).error, /--since/);
+  });
+
+  test("the launcher forwards --task, on a given transcript and on the session named by the variable", () => {
+    const launcher = ensureLauncher({ env: { DEVMANAGER_STATE_DIR: scratch("cf-state-") } });
+
+    const given = cli(launcher, ["--since", START_12, "--task", "12", BATCH]);
+    assert.equal(given.status, 0, given.stderr);
+    assert.equal(JSON.parse(given.stdout).tokensOut, 860);
+
+    const home = scratch("cf-home-");
+    const ID = "55555555-aaaa-4bbb-8ccc-000000000005";
+    const folder = path.join(home, ".claude", "projects", "d--somewhere");
+    mkdirSync(folder, { recursive: true });
+    cpSync(BATCH, path.join(folder, `${ID}.jsonl`));
+    cpSync(path.join(FIXTURES, "session-batch"), path.join(folder, ID), { recursive: true });
+    const env = cleanEnv({ HOME: home, USERPROFILE: home, CLAUDE_CODE_SESSION_ID: ID });
+    const named = cli(launcher, ["--since", START_12, "--task", "#12"], env);
+    assert.equal(named.status, 0, named.stderr);
+    const out = JSON.parse(named.stdout);
+    assert.equal(out.transcript, path.join(folder, `${ID}.jsonl`));
+    assert.equal(out.tokensOut, 860);
+
+    const refused = cli(launcher, ["--task", "12"], env);
+    assert.equal(refused.status, 1);
+    assert.equal(refused.stdout, "");
+    assert.match(refused.stderr, /--task needs --since/);
+  });
+
+  test("the Stop hook counts by the task's number, and its reason asks for --task", async () => {
+    const { root, repo, dir, task } = world();
+    writeState(dir, CURRENT_TASK, { ...task, startedAt: START_12 });
+
+    const result = await run({
+      stdin: Readable.from([JSON.stringify({ cwd: repo, transcript_path: BATCH })]),
+      env: { DEVMANAGER_STATE_DIR: root },
+    });
+
+    const usage = readState(dir, LAST_USAGE);
+    assert.equal(usage.task, 12);
+    assert.equal(usage.tokensOut, 860);
+    assert.deepEqual(usage.excludedSources.map((e) => e.source), ["agent-a13plan", "agent-a13rev"]);
+    assert.match(result.reason, new RegExp(`--since ${START_12.replace(/[.]/g, "\\.")} --task 12\``));
+  });
+
+  test("the Stop hook with a task number that does not parse counts by the hour, as before", async () => {
+    const { root, repo, dir, task } = world();
+    writeState(dir, CURRENT_TASK, { ...task, task: "twelve", startedAt: START_12 });
+
+    const result = await run({
+      stdin: Readable.from([JSON.stringify({ cwd: repo, transcript_path: BATCH })]),
+      env: { DEVMANAGER_STATE_DIR: root },
+    });
+
+    const usage = readState(dir, LAST_USAGE);
+    assert.equal("task" in usage, false);
+    assert.equal(usage.tokensOut, 60 + 500 + 700);
+    assert.match(result.reason, /--task <n>/);
   });
 });
