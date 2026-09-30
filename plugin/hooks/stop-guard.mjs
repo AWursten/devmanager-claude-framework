@@ -2,7 +2,7 @@
 // of a DevManager task.
 //
 // While the `work` skill has a task open it keeps
-// `~/.claude/devmanager-state/<project-id>/current-task.json`, with the
+// `~/.claude/devmanager-state/<project-id>/<task-number>/current-task.json`, with the
 // repository the task was started in. If a session working inside that
 // repository tries to stop with the file still there, the board is about to
 // start lying: a task sits in progress that nobody is working, with no
@@ -16,6 +16,7 @@
 // changes. After that it gets out of the way. A guard that can hold a session
 // forever is worse than the state it is guarding.
 
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -55,6 +56,9 @@ export function blockReason(currentTask, dir) {
     "",
     "If the task cannot be finished, that is also a close: say why in a comment, log the time spent,",
     "leave the task where it belongs, and delete the state file. What is not allowed is silence.",
+    "",
+    "If this session is not the one working that task, say so and stop again: the guard steps aside",
+    `after ${MAX_BLOCKS} refusals.`,
   ].join("\n");
 }
 
@@ -113,7 +117,9 @@ export async function run({ stdin = process.stdin, env = process.env } = {}) {
   // Capture usage even when the stop is allowed: the numbers are cheap to take
   // and the close may be happening in this very turn.
   if (open) {
-    const usage = captureUsage(input.transcript_path);
+    // From the task's start, not the session's: a session that worked two
+    // tasks must not log the first one's tokens against the second.
+    const usage = captureUsage(input.transcript_path, { since: open.task.startedAt });
     if (usage) writeState(open.dir, LAST_USAGE, { ...usage, sessionId: input.session_id ?? null });
   }
 
@@ -131,11 +137,23 @@ export async function run({ stdin = process.stdin, env = process.env } = {}) {
   return decision;
 }
 
-const invokedDirectly =
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+/**
+ * Whether this module is the script node was asked to run. Both sides go
+ * through realpath: node resolves symlinks in `import.meta.url` and not in
+ * `argv[1]`, so a plugin reached through a linked `~/.claude` would otherwise
+ * never run — and a Stop hook that silently does nothing is the worst failure
+ * it has.
+ */
+function isMain(metaUrl) {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(metaUrl));
+  } catch {
+    return false;
+  }
+}
 
-if (invokedDirectly) {
+if (isMain(import.meta.url)) {
   // Exit 0 always: the block is carried by the JSON above, and a non-zero exit
   // from a crash here must never be read as "block the stop".
   run().then(

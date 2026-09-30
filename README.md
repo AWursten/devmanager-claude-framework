@@ -2,7 +2,7 @@
 
 The optional Claude Code plugin for working DevManager tasks, and the older repo template it replaces.
 
-**You do not need anything from this repo to work with DevManager.** A session that has only the DevManager connector already works tasks with the full protocol: the server hands every session its working rules when it connects, each tool result says what comes next, the close is rejected unless it declares the documentation check, and the `work`, `sync-docs` and `adopt-lite` skills come from the organization's baseline as prompts of the connector. This repo adds the part that cannot live on a server because it has to run on the developer's machine.
+**You do not need anything from this repo to work with DevManager.** A session that has only the DevManager connector already works tasks with the full protocol: the server hands every session its working rules when it connects, each tool result says what comes next, in STANDARD and PRODUCTION projects the close is rejected unless it declares the documentation check, and the `work`, `sync-docs` and `adopt-lite` skills come from the organization's baseline as prompts of the connector. This repo adds the part that cannot live on a server because it has to run on the developer's machine.
 
 ## Where each rule lives
 
@@ -44,15 +44,17 @@ Then, in any repo with a linked DevManager project, ask for a task (`trabajá la
 ```
 plugin/
   .claude-plugin/plugin.json    the manifest — the plugin is named `devmanager`
-  hooks/hooks.json              the Stop hook, run with node from the plugin root
+  hooks/hooks.json              the Stop and SessionStart hooks, run with node from the plugin root
   hooks/stop-guard.mjs          will not let a session end with a task open
+  hooks/session-start.mjs       leaves the token counter where the `work` skill can run it
   hooks/capture-usage.mjs       token accounting from the session transcript
-  hooks/lib/state.mjs           ~/.claude/devmanager-state/<project-id>/*.json
+  hooks/lib/state.mjs           ~/.claude/devmanager-state/<project-id>/<task-number>/*.json
   agents/                       planner · implementer · reviewer · tester
 ```
 
-- **The Stop hook.** While the `work` skill has a task open it keeps `~/.claude/devmanager-state/<project-id>/current-task.json`, with the repository the task was started in. A session working inside that repository cannot end until the task is closed — documentation check, closing comment, time, `submit_for_review` — and the hook writes the session's token usage to `last-usage.json` next to it, which is where `work` reads the tokens it logs. It gives up after two refusals per task: a guard that can hold a session forever is worse than the state it guards. Sessions in other repositories are never blocked.
-- **The four agents**, invoked as `devmanager:planner`, `devmanager:implementer`, `devmanager:reviewer` and `devmanager:tester`. The planner and the reviewer have their tools restricted by configuration — they can read the repo and DevManager and write nothing.
+- **The Stop hook.** While the `work` skill has a task open it keeps `~/.claude/devmanager-state/<project-id>/<task-number>/current-task.json`, with the repository the task was started in — one folder per task, so two worktrees of the same project do not overwrite each other. A session working inside that repository cannot end until the task is closed — documentation check, closing comment, time, `submit_for_review` — and the hook writes the tokens spent since the task started to `last-usage.json` next to it. It gives up after two refusals per task: a guard that can hold a session forever is worse than the state it guards. Sessions in other repositories are never blocked.
+- **Tokens per task.** At session start the plugin writes `~/.claude/devmanager-state/capture-usage.mjs`, a launcher for its token counter. At the close, `work` runs `node ~/.claude/devmanager-state/capture-usage.mjs --since <the task's start>` and logs what it prints, already in the shape `log_time` takes. Counting from the task's start is what makes a batch attributable: each task gets what was spent after it began.
+- **The four agents**, invoked as `devmanager:planner`, `devmanager:implementer`, `devmanager:reviewer` and `devmanager:tester`. The planner has no tool that writes. The reviewer's only one is `Bash`, which it has to run git and the test commands; not writing with it is an instruction, not a restriction. Implementer and tester have every tool.
 
 ## What you lose without the plugin
 
@@ -60,7 +62,7 @@ The protocol is the same with or without it. Three things are not:
 
 - **Tokens per task.** Without the hook nothing reads the session transcript, so time is logged without tokens. An absent count is honest; `work` never estimates one.
 - **The block on ending a session with a task open.** The server makes up for part of it: `get_work_queue` and `list_my_tasks` flag a task left in progress with no activity for four hours, so the next session resumes it or closes it.
-- **Hard tool restrictions on the planner and the reviewer.** Without the named agents, `work` launches generic subagents with the role text from the baseline document `work-roles`, and the restriction becomes an instruction the calling session has to verify.
+- **Tool restrictions on the planner and the reviewer.** Without the named agents, `work` launches generic subagents with the role text from the baseline document `work-roles`, and the restriction becomes an instruction the calling session has to verify.
 
 ## Language
 

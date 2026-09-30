@@ -7,7 +7,17 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  existsSync,
+  writeFileSync,
+  symlinkSync,
+} from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -19,13 +29,14 @@ import {
   LAST_USAGE,
   STOP_GUARD,
   stateRoot,
-  projectStateDir,
   readState,
   writeState,
   clearState,
   findOpenTask,
   isInside,
 } from "../plugin/hooks/lib/state.mjs";
+import { captureUsage, main as captureMain } from "../plugin/hooks/capture-usage.mjs";
+import { ensureLauncher, launcherSource, LAUNCHER } from "../plugin/hooks/session-start.mjs";
 
 const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PLUGIN = path.join(REPO, "plugin");
@@ -41,12 +52,16 @@ function scratch(prefix = "cf-plugin-") {
   return dir;
 }
 
+/** The folder `work` writes a task's state to: one per project, one per task inside. */
+const taskDir = (root, project, number) => path.join(root, project, number);
+
 /** A state root, a repo, and a task open in that repo. */
 function world() {
   const root = scratch("cf-state-");
   const repo = scratch("cf-repo-");
-  const task = { project: "proj1", task: "#12", startedAt: "2026-09-30T10:00:00.000Z", cwd: repo };
-  const dir = projectStateDir(root, "proj1");
+  // Before the task's first message, so the whole fixture counts as this task's.
+  const task = { project: "proj1", task: "#12", startedAt: "2026-08-29T00:00:00.000Z", cwd: repo };
+  const dir = taskDir(root, "proj1", "12");
   writeState(dir, CURRENT_TASK, task);
   return { root, repo, task, dir };
 }
@@ -68,15 +83,20 @@ describe("manifests", () => {
     assert.ok(manifest.description.length > 0);
   });
 
-  test("the Stop hook runs the guard from the plugin root, and the file is there", () => {
+  test("the Stop and SessionStart hooks run from the plugin root, and their files are there", () => {
     const hooks = json(path.join(PLUGIN, "hooks", "hooks.json"));
-    const command = hooks.hooks.Stop[0].hooks[0].command;
-    assert.match(command, /\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/stop-guard\.mjs/);
-    assert.ok(existsSync(path.join(PLUGIN, "hooks", "stop-guard.mjs")));
+    for (const [event, file] of [
+      ["Stop", "stop-guard.mjs"],
+      ["SessionStart", "session-start.mjs"],
+    ]) {
+      const command = hooks.hooks[event][0].hooks[0].command;
+      assert.equal(command, `node "\${CLAUDE_PLUGIN_ROOT}/hooks/${file}"`);
+      assert.ok(existsSync(path.join(PLUGIN, "hooks", file)));
+    }
   });
 
   test("no hook reads CLAUDE_PROJECT_DIR: the session's directory comes from the hook input", () => {
-    for (const file of ["stop-guard.mjs", "capture-usage.mjs", path.join("lib", "state.mjs")]) {
+    for (const file of ["stop-guard.mjs", "session-start.mjs", "capture-usage.mjs", path.join("lib", "state.mjs")]) {
       const source = readFileSync(path.join(PLUGIN, "hooks", file), "utf8");
       assert.doesNotMatch(source, /env\.CLAUDE_PROJECT_DIR|process\.env\.CLAUDE_PROJECT_DIR/, file);
     }
@@ -105,7 +125,8 @@ describe("agents", () => {
     }
   });
 
-  test("planner and reviewer are read-only by configuration", () => {
+  test("the planner has no tool that writes; the reviewer's only one is Bash", () => {
+    assert.ok(!frontmatter("planner.md").tools.split(",").map((t) => t.trim()).includes("Bash"));
     for (const file of ["planner.md", "reviewer.md"]) {
       const tools = frontmatter(file).tools.split(",").map((t) => t.trim());
       for (const forbidden of ["Edit", "Write", "NotebookEdit"]) {
@@ -132,19 +153,13 @@ describe("state", () => {
     assert.equal(stateRoot({ DEVMANAGER_STATE_DIR: "/x" }, "/home/ana"), "/x");
   });
 
-  test("a project folder is a plain segment: a crafted id never escapes the root", () => {
-    assert.equal(projectStateDir("/r", "cmrnp63d500eh8bltsv2ceww4"), path.join("/r", "cmrnp63d500eh8bltsv2ceww4"));
-    assert.equal(projectStateDir("/r", "../etc"), null);
-    assert.equal(projectStateDir("/r", "a/b"), null);
-    assert.equal(projectStateDir("/r", ""), null);
-    assert.equal(projectStateDir("/r", undefined), null);
-  });
-
   test("round-trips, and treats missing or corrupt as absent", () => {
-    const dir = path.join(scratch(), "p");
+    const dir = path.join(scratch(), "p", "1");
     assert.equal(readState(dir, CURRENT_TASK), null);
     assert.equal(writeState(dir, CURRENT_TASK, { task: "#1" }), true);
     assert.deepEqual(readState(dir, CURRENT_TASK), { task: "#1" });
+    writeFileSync(path.join(dir, CURRENT_TASK), "{not json");
+    assert.equal(readState(dir, CURRENT_TASK), null, "a corrupt file must never throw in a hook");
     assert.equal(clearState(dir, CURRENT_TASK), true);
     assert.equal(clearState(dir, CURRENT_TASK), false);
   });
@@ -165,17 +180,39 @@ describe("state", () => {
     assert.equal(findOpenTask(root, undefined), null);
   });
 
-  test("a task with no cwd is ignored: it cannot be told from one in another repo", () => {
+  test("a task with no cwd, or one that is not a string, is ignored", () => {
     const root = scratch();
-    writeState(projectStateDir(root, "p"), CURRENT_TASK, { project: "p", task: "#1" });
+    writeState(taskDir(root, "p", "1"), CURRENT_TASK, { project: "p", task: "#1" });
+    writeState(taskDir(root, "p", "2"), CURRENT_TASK, { project: "p", task: "#2", cwd: 42 });
     assert.equal(findOpenTask(root, process.cwd()), null);
+  });
+
+  test("two worktrees of the same project each find their own task", () => {
+    const { root, repo, dir } = world();
+    const other = scratch("cf-worktree-");
+    const task13 = { project: "proj1", task: "#13", startedAt: "2026-09-30T12:00:00.000Z", cwd: other };
+    writeState(taskDir(root, "proj1", "13"), CURRENT_TASK, task13);
+
+    assert.equal(findOpenTask(root, repo).task.task, "#12");
+    assert.equal(findOpenTask(root, repo).dir, dir);
+    assert.equal(findOpenTask(root, other).task.task, "#13");
+    // Closing one leaves the other open.
+    clearState(dir, CURRENT_TASK);
+    assert.equal(findOpenTask(root, repo), null);
+    assert.equal(findOpenTask(root, other).task.task, "#13");
   });
 
   test("two tasks open in the same repo: the most recently started wins", () => {
     const { root, repo } = world();
     const newer = { project: "proj2", task: "#99", startedAt: "2026-09-30T12:00:00.000Z", cwd: repo };
-    writeState(projectStateDir(root, "proj2"), CURRENT_TASK, newer);
+    writeState(taskDir(root, "proj2", "99"), CURRENT_TASK, newer);
     assert.equal(findOpenTask(root, repo).task.task, "#99");
+  });
+
+  test("on Windows, drive-letter case and slash direction do not matter", { skip: process.platform !== "win32" }, () => {
+    // `git rev-parse --show-toplevel` prints D:/x/app; Claude Code sends d:\\x\\app.
+    assert.equal(isInside("d:\\x\\app\\src", "D:/x/app"), true);
+    assert.equal(isInside("d:\\x\\app-2", "D:/x/app"), false);
   });
 
   test("a missing state root is no open task, not an error", () => {
@@ -283,10 +320,136 @@ describe("run", () => {
     assert.equal(readState(dir, LAST_USAGE), null);
   });
 
+  test("counts the task's tokens from its start, not the session's", async () => {
+    const { root, repo, dir, task } = world();
+    // The fixture's messages run from 12:00 on 2026-08-29; a task started after
+    // the last one has spent nothing of it.
+    writeState(dir, CURRENT_TASK, { ...task, startedAt: "2026-08-30T00:00:00.000Z" });
+
+    await run({
+      stdin: stdin({ cwd: repo, transcript_path: path.join(FIXTURES, "transcript-basic.jsonl") }),
+      env: { DEVMANAGER_STATE_DIR: root },
+    });
+
+    assert.equal(readState(dir, LAST_USAGE), null);
+  });
+
   test("malformed input never throws: no cwd means the process cwd, and nothing is open there", async () => {
     const root = scratch();
     mkdirSync(root, { recursive: true });
     const result = await run({ stdin: Readable.from(["not json"]), env: { DEVMANAGER_STATE_DIR: root } });
     assert.equal(result.block, false);
+  });
+});
+
+describe("the hook as Claude Code runs it", () => {
+  /** Run a hook file with node, the way hooks.json does, and return what it printed. */
+  function spawnHook(file, input, env) {
+    const result = spawnSync(process.execPath, [file], {
+      input: JSON.stringify(input),
+      env: { ...process.env, ...env },
+      encoding: "utf8",
+    });
+    return { status: result.status, stdout: result.stdout.trim() };
+  }
+
+  test("blocks through the real entry point, and exits 0", () => {
+    const { root, repo } = world();
+    const out = spawnHook(path.join(PLUGIN, "hooks", "stop-guard.mjs"), { cwd: repo }, { DEVMANAGER_STATE_DIR: root });
+    assert.equal(out.status, 0);
+    assert.equal(JSON.parse(out.stdout).decision, "block");
+  });
+
+  test("still runs when the plugin is reached through a symlink", (t) => {
+    const { root, repo } = world();
+    const link = path.join(scratch("cf-link-"), "plugin");
+    try {
+      // A junction on Windows needs no privileges; elsewhere it is a plain symlink.
+      symlinkSync(PLUGIN, link, "junction");
+    } catch {
+      t.skip("cannot create a symlink here");
+      return;
+    }
+    const out = spawnHook(path.join(link, "hooks", "stop-guard.mjs"), { cwd: repo }, { DEVMANAGER_STATE_DIR: root });
+    assert.equal(out.status, 0);
+    assert.equal(JSON.parse(out.stdout).decision, "block", "a linked plugin must not go silent");
+  });
+
+  test("allows, printing nothing, from a repo with no open task", () => {
+    const { root } = world();
+    const out = spawnHook(
+      path.join(PLUGIN, "hooks", "stop-guard.mjs"),
+      { cwd: scratch("cf-other-") },
+      { DEVMANAGER_STATE_DIR: root },
+    );
+    assert.equal(out.status, 0);
+    assert.equal(out.stdout, "");
+  });
+});
+
+describe("tokens since the task started", () => {
+  test("captureUsage with since keeps only what came after", () => {
+    const transcript = path.join(FIXTURES, "transcript-basic.jsonl");
+    const all = captureUsage(transcript);
+    assert.equal(captureUsage(transcript, { since: "2026-08-29T00:00:00.000Z" }).tokensOut, all.tokensOut);
+    assert.equal(captureUsage(transcript, { since: "2026-08-30T00:00:00.000Z" }), null);
+  });
+
+  test("the command line takes --since and a transcript, and prints the log_time shape", () => {
+    const logged = [];
+    const original = console.log;
+    console.log = (value) => logged.push(value);
+    try {
+      captureMain(["--since", "2026-08-29T00:00:00.000Z", path.join(FIXTURES, "transcript-basic.jsonl")]);
+      captureMain(["--since", "2026-08-30T00:00:00.000Z", path.join(FIXTURES, "transcript-basic.jsonl")]);
+    } finally {
+      console.log = original;
+    }
+    const [some, none] = logged.map((l) => JSON.parse(l));
+    assert.equal(some.logTime.tokensOut, 900);
+    assert.equal(some.since, "2026-08-29T00:00:00.000Z");
+    assert.equal(none, null, "nothing derivable is null: the cue to log time without tokens");
+  });
+});
+
+describe("session-start: the launcher", () => {
+  test("writes a launcher into the state root that imports this plugin's capture-usage", () => {
+    const root = scratch("cf-state-");
+    const file = ensureLauncher({ env: { DEVMANAGER_STATE_DIR: root } });
+    assert.equal(file, path.join(root, LAUNCHER));
+    const source = readFileSync(file, "utf8");
+    assert.match(source, /capture-usage\.mjs"/);
+    assert.match(source, /main\(\);/);
+  });
+
+  test("the launcher runs, and prints JSON (null when this machine has no transcript for the cwd)", () => {
+    const root = scratch("cf-state-");
+    const file = ensureLauncher({ env: { DEVMANAGER_STATE_DIR: root } });
+    const result = spawnSync(process.execPath, [file, path.join(FIXTURES, "transcript-basic.jsonl")], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).logTime.tokensOut, 900);
+  });
+
+  test("rewrites the launcher when the plugin moves, and leaves it alone otherwise", () => {
+    const root = scratch("cf-state-");
+    const env = { DEVMANAGER_STATE_DIR: root };
+    ensureLauncher({ env, captureUsagePath: path.join(scratch(), "old", "capture-usage.mjs") });
+    const file = ensureLauncher({ env });
+    assert.equal(readFileSync(file, "utf8"), launcherSource(path.join(PLUGIN, "hooks", "capture-usage.mjs")));
+  });
+
+  test("never throws: an unwritable root is null", () => {
+    const blocker = path.join(scratch(), "a-file");
+    writeFileSync(blocker, "x");
+    assert.equal(ensureLauncher({ env: { DEVMANAGER_STATE_DIR: path.join(blocker, "sub") } }), null);
+  });
+
+  test("the launcher is a file in the root, so it is never mistaken for a project folder", () => {
+    const { root, repo } = world();
+    ensureLauncher({ env: { DEVMANAGER_STATE_DIR: root } });
+    assert.equal(findOpenTask(root, repo).task.task, "#12");
+    assert.ok(readdirSync(root).includes(LAUNCHER));
   });
 });

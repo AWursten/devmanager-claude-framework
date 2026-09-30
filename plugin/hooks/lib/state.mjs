@@ -1,11 +1,13 @@
-// ~/.claude/devmanager-state/<project-id>/*.json — the small amount of state a
-// session carries between the `work` skill that opens a task and the hook that
-// refuses to let it end.
+// ~/.claude/devmanager-state/<project-id>/<task-number>/*.json — the small
+// amount of state a session carries between the `work` skill that opens a task
+// and the hook that refuses to let it end.
 //
 // It lives in the user's home and not in the repository, one folder per
 // DevManager project, so installing the plugin touches nobody's `.gitignore`.
-// The price is that the hook no longer knows the folder up front: it finds the
-// open task by the `cwd` the skill recorded in it (see `findOpenTask`).
+// Inside it, one folder per open task: two worktrees of the same project can each
+// have a task open without overwriting each other's file. The price is that the
+// hook no longer knows the folder up front: it finds the open task by the `cwd`
+// the skill recorded in it (see `findOpenTask`).
 //
 // Nothing in here is shared, durable, or worth recovering: if a file is missing
 // or corrupt the answer is always "act as if there is no state", never "throw
@@ -26,16 +28,6 @@ export const STOP_GUARD = "stop-guard.json";
  */
 export function stateRoot(env = process.env, home = os.homedir()) {
   return env.DEVMANAGER_STATE_DIR || path.join(home, ".claude", "devmanager-state");
-}
-
-/**
- * One project's folder. The id comes from DevManager (a cuid), but it is data
- * the skill wrote, so anything that is not a plain segment is refused rather
- * than joined into a path.
- */
-export function projectStateDir(root, projectId) {
-  if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId)) return null;
-  return path.join(root, projectId);
 }
 
 /** The parsed file, or null — missing, unreadable and malformed are all null. */
@@ -86,6 +78,17 @@ export function isInside(inner, outer) {
   return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
+/** The subfolders of a folder, or none — a missing or unreadable one is empty. */
+function subdirs(dir) {
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => path.join(dir, e.name));
+  } catch {
+    return [];
+  }
+}
+
 /**
  * The task this session has open, or null.
  *
@@ -95,26 +98,20 @@ export function isInside(inner, outer) {
  * way to tell it from one open in another repository on the same machine, and
  * blocking the wrong session is worse than not blocking.
  *
- * With more than one match (two tasks open in the same repository, which the
- * skill does not do) the most recently started wins, so the guard still names
- * one task instead of none.
+ * With more than one match (two tasks open in the same repository) the most
+ * recently started wins, so the guard still names one task instead of none.
  */
 export function findOpenTask(root, cwd) {
   if (!cwd) return null;
-  let entries = [];
-  try {
-    entries = readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory());
-  } catch {
-    return null;
-  }
 
   let best = null;
-  for (const entry of entries) {
-    const dir = path.join(root, entry.name);
-    const task = readState(dir, CURRENT_TASK);
-    if (!task || typeof task.cwd !== "string" || !isInside(cwd, task.cwd)) continue;
-    const started = Date.parse(task.startedAt) || 0;
-    if (!best || started > best.started) best = { dir, task, started };
+  for (const projectDir of subdirs(root)) {
+    for (const dir of subdirs(projectDir)) {
+      const task = readState(dir, CURRENT_TASK);
+      if (!task || typeof task.cwd !== "string" || !isInside(cwd, task.cwd)) continue;
+      const started = Date.parse(task.startedAt) || 0;
+      if (!best || started > best.started) best = { dir, task, started };
+    }
   }
   return best ? { dir: best.dir, task: best.task } : null;
 }

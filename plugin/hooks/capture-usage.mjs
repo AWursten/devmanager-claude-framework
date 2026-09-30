@@ -28,7 +28,7 @@
 // If usage cannot be derived, this returns null. `work` then logs time without
 // tokens: an absent number is honest, an invented one is not.
 
-import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,8 +73,14 @@ export function parseTranscript(text) {
 /**
  * Sum one transcript's entries. `source` labels where they came from, so a
  * caller can attribute a batch across the subagents that did the work.
+ *
+ * `since` (an ISO date) keeps only what was spent from that moment on: it is
+ * how a close counts the tokens of ITS task and not of the whole session. An
+ * entry without a timestamp cannot be placed, so with `since` it is left out —
+ * an undercount says so, an overcount does not.
  */
-export function summarize(entries, source = "main") {
+export function summarize(entries, source = "main", { since } = {}) {
+  const from = since ? Date.parse(since) : NaN;
   const totals = EMPTY();
   const byModel = {};
   const seen = new Set();
@@ -84,6 +90,10 @@ export function summarize(entries, source = "main") {
     const message = entry.message;
     const usage = message?.usage;
     if (!usage || typeof usage !== "object") continue;
+    if (!Number.isNaN(from)) {
+      const at = Date.parse(entry.timestamp);
+      if (Number.isNaN(at) || at < from) continue;
+    }
 
     // See the header: one message, many lines, identical usage on each.
     const id = message.id ?? entry.requestId ?? entry.uuid;
@@ -123,12 +133,12 @@ function mergeInto(target, other) {
  * Total usage for a session: its own transcript plus, unless asked otherwise,
  * every subagent transcript beside it. Returns null when nothing is derivable.
  */
-export function captureUsage(transcriptPath, { includeSubagents = true } = {}) {
+export function captureUsage(transcriptPath, { includeSubagents = true, since } = {}) {
   if (!transcriptPath || !existsSync(transcriptPath)) return null;
 
   let result = null;
   try {
-    result = summarize(parseTranscript(readFileSync(transcriptPath, "utf8")), "main");
+    result = summarize(parseTranscript(readFileSync(transcriptPath, "utf8")), "main", { since });
   } catch {
     return null;
   }
@@ -145,7 +155,7 @@ export function captureUsage(transcriptPath, { includeSubagents = true } = {}) {
       let part = null;
       try {
         const label = path.basename(file, ".jsonl");
-        part = summarize(parseTranscript(readFileSync(path.join(dir, file), "utf8")), label);
+        part = summarize(parseTranscript(readFileSync(path.join(dir, file), "utf8")), label, { since });
       } catch {
         continue;
       }
@@ -155,7 +165,7 @@ export function captureUsage(transcriptPath, { includeSubagents = true } = {}) {
   }
 
   if (!result) return null;
-  return { ...result, transcript: transcriptPath, capturedAt: new Date().toISOString() };
+  return { ...result, since: since ?? null, transcript: transcriptPath, capturedAt: new Date().toISOString() };
 }
 
 /**
@@ -234,12 +244,36 @@ export function captureCurrentUsage(options = {}) {
   return transcript ? captureUsage(transcript, options) : null;
 }
 
-const invokedDirectly =
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
-
-if (invokedDirectly) {
-  const [given] = process.argv.slice(2);
-  const usage = given ? captureUsage(given) : captureCurrentUsage();
-  console.log(JSON.stringify(usage, null, 2));
+/**
+ * The command line: `[--since <ISO>] [<transcript.jsonl>]`. Prints the capture
+ * and, under `logTime`, the same numbers in the shape `log_time` takes — or
+ * `null` when nothing is derivable, which is the cue to log time without tokens.
+ *
+ * Exported because the `work` skill does not run this file directly: it runs
+ * the launcher the SessionStart hook leaves in the state folder, which imports
+ * this and calls it. The plugin's install path is not something a session knows.
+ */
+export function main(argv = process.argv.slice(2), options = {}) {
+  let since;
+  let given;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--since") since = argv[++i];
+    else given = argv[i];
+  }
+  const usage = given ? captureUsage(given, { since }) : captureCurrentUsage({ ...options, since });
+  const out = usage ? { ...usage, logTime: toLogTimeTokens(usage) } : null;
+  console.log(JSON.stringify(out, null, 2));
+  return out;
 }
+
+/** Whether this module is the script node was asked to run, symlinks resolved. */
+function isMain(metaUrl) {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(metaUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isMain(import.meta.url)) main();
