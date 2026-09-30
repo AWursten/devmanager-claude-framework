@@ -57,21 +57,40 @@ export function taskKey(currentTask) {
   return [currentTask.project, currentTask.task, currentTask.startedAt].join("@");
 }
 
-export function blockReason(currentTask, dir) {
-  const number = currentTask?.task ?? "the open task";
-  const file = dir ? path.join(dir, "current-task.json") : "current-task.json";
-  const since = currentTask?.startedAt ?? "<startedAt>";
+/**
+ * Step 3 of the close. It only offers the counter's command when the task's
+ * start is one the counter accepts: a command that exits 1 is not advice.
+ */
+function logTimeStep(currentTask) {
   const task = parseTaskNumber(String(currentTask?.task)) ?? "<n>";
+  const counter = "node ~/.claude/devmanager-state/capture-usage.mjs";
+  if (isIsoInstant(currentTask?.startedAt)) {
+    return [
+      "  3. log_time — the minutes, and the tokens that",
+      `     \`${counter} --since ${currentTask.startedAt} --task ${task}\``,
+      '     prints under logTime (null or an error: log the time without tokens), source: "AI".',
+    ];
+  }
   return [
-    `Task ${number} is still open — ${file} exists, so this session has not closed it.`,
+    '  3. log_time — the minutes, source: "AI", and no tokens: the task\'s start (startedAt in the',
+    "     file above) cannot be read, and the token counter does not count without one. Only if the",
+    "     person confirms when the task started, count from then instead:",
+    `     \`${counter} --since <that start, as 2026-09-30T13:00:00.000Z> --task ${task}\`.`,
+  ];
+}
+
+export function blockReason(currentTask, dir) {
+  const raw = currentTask?.task;
+  const named = raw !== undefined && raw !== null && String(raw).trim() !== "";
+  const file = dir ? path.join(dir, "current-task.json") : "current-task.json";
+  return [
+    `${named ? `Task ${raw}` : "A DevManager task"} is still open — ${file} exists, so this session has not closed it.`,
     "",
     "Finish step 8 of the `work` skill before stopping:",
     "  1. Documentation check — read the project's documents against what you built, fix what the",
     "     work made false (upsert_document), and keep the result for docs_check.",
     "  2. add_comment — what was done, decisions taken, deviations from the plan, what to verify.",
-    "  3. log_time — the minutes, and the tokens that",
-    `     \`node ~/.claude/devmanager-state/capture-usage.mjs --since ${since} --task ${task}\``,
-    '     prints under logTime (null or an error: log the time without tokens), source: "AI".',
+    ...logTimeStep(currentTask),
     "  4. submit_for_review with docs_check — the state transition. Never complete_task unless the",
     "     project has no review column and the human said to close fully.",
     `  5. Delete ${file}.`,

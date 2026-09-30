@@ -1507,7 +1507,7 @@ describe("tokens by task: each subagent counts for the task on its label", () =>
     assert.equal("excludedSources" in usage, false);
     assert.equal(usage.since, START_12);
     assert.equal(usage.tokensOut, 60 + 500 + 700);
-    assert.match(result.reason, /^Task the open task is still open/);
+    assert.match(result.reason, /^A DevManager task is still open/);
     assert.match(result.reason, new RegExp(`--since ${START_12.replace(/[.]/g, "\\.")} --task <n>\``));
     assert.doesNotMatch(result.reason, /undefined|NaN|Task null|--task null/);
   });
@@ -1609,5 +1609,34 @@ describe("the Stop hook with a start that is not an ISO instant", () => {
     assert.equal("task" in usage, false);
     assert.equal(usage.since, null);
     assert.equal(usage.tokensOut, 40 + 60 + 300 + 310 + 500 + 700);
+  });
+});
+
+describe("the Stop hook's reason reads right with whatever current-task.json carries", () => {
+  const TASK = { project: "p", task: "#12", startedAt: "2026-09-30T13:00:00.000Z", cwd: "/r" };
+  const reason = (task) => decide({ currentTask: task, dir: "/state/p/12", guard: null }).reason;
+
+  test("with a number, it names the task and gives the counter's command with --since and --task", () => {
+    const text = reason(TASK);
+    assert.match(text, /^Task #12 is still open — /);
+    assert.match(text, /capture-usage\.mjs --since 2026-09-30T13:00:00\.000Z --task 12`/);
+  });
+
+  test("without a number, it says a task is open instead of naming one it does not have", () => {
+    for (const task of [undefined, null, "", "  "]) {
+      const text = reason({ ...TASK, task });
+      assert.match(text, /^A DevManager task is still open — /, JSON.stringify(task));
+      assert.doesNotMatch(text, /Task (undefined|null|the open task)/);
+    }
+  });
+
+  test("with a start the counter would refuse, it offers no command that fails: time without tokens", () => {
+    for (const startedAt of ["12", "yesterday", "2026-09-30", undefined]) {
+      const text = reason({ ...TASK, startedAt });
+      assert.match(text, /no tokens: the task's start \(startedAt in the/, String(startedAt));
+      assert.doesNotMatch(text, new RegExp(`--since ${startedAt}\b`), String(startedAt));
+      assert.match(text, /Only if the\s+person confirms when the task started/);
+      assert.match(text, /--since <that start, as 2026-09-30T13:00:00\.000Z> --task 12`/);
+    }
   });
 });
