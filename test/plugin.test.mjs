@@ -95,6 +95,13 @@ describe("manifests", () => {
     assert.ok(manifest.description.length > 0);
   });
 
+  test("the plugin and its marketplace entry carry the same x.y.z version — Claude Code offers the update by it", () => {
+    const manifest = json(path.join(PLUGIN, ".claude-plugin", "plugin.json"));
+    const entry = json(path.join(REPO, ".claude-plugin", "marketplace.json")).plugins.find((p) => p.name === "devmanager");
+    assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
+    assert.equal(entry.version, manifest.version);
+  });
+
   test("the Stop and SessionStart hooks run from the plugin root, and their files are there", () => {
     const hooks = json(path.join(PLUGIN, "hooks", "hooks.json"));
     for (const [event, file] of [
