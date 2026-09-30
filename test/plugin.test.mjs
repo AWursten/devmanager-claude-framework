@@ -83,8 +83,10 @@ const json = (file) => JSON.parse(readFileSync(file, "utf8"));
 describe("manifests", () => {
   test("the repo is its own marketplace, and its plugin is ./plugin", () => {
     const market = json(path.join(REPO, ".claude-plugin", "marketplace.json"));
-    const entry = market.plugins.find((p) => p.name === "devmanager");
-    assert.ok(entry, "the marketplace lists the devmanager plugin");
+    const entries = market.plugins.filter((p) => p.name === "devmanager");
+    // A second entry would go unnoticed by find(), and which one Claude Code installs is not ours to pick.
+    assert.equal(entries.length, 1, "the marketplace lists the devmanager plugin exactly once");
+    const [entry] = entries;
     assert.equal(entry.source, "./plugin");
     assert.ok(existsSync(path.join(REPO, entry.source, ".claude-plugin", "plugin.json")));
   });
@@ -98,6 +100,7 @@ describe("manifests", () => {
   test("the plugin and its marketplace entry carry the same x.y.z version — Claude Code offers the update by it", () => {
     const manifest = json(path.join(PLUGIN, ".claude-plugin", "plugin.json"));
     const entry = json(path.join(REPO, ".claude-plugin", "marketplace.json")).plugins.find((p) => p.name === "devmanager");
+    assert.ok(entry, "marketplace.json has no plugin entry named devmanager");
     assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
     assert.equal(entry.version, manifest.version);
   });
