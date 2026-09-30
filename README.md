@@ -28,14 +28,21 @@ Nothing that has to be always on depends on a file on the client side.
 
   Name it `devmanager`: the plugin's read-only agents list their DevManager tools as `mcp__devmanager__*`, and a connector registered under another name leaves them without DevManager access.
 
-- **Optional, once per machine — the plugin:**
+- **Optional, once per machine — the plugin**, from a Claude Code session in any of its surfaces (terminal, VS Code, JetBrains):
 
   ```
-  /plugin marketplace add <path to, or git URL of, this repo>
+  /plugin marketplace add AWursten/devmanager-claude-framework
   /plugin install devmanager@claude-framework
   ```
 
-  Nothing is added to any project repo, and no `.gitignore` needs a line.
+  or from a shell:
+
+  ```bash
+  claude plugin marketplace add AWursten/devmanager-claude-framework
+  claude plugin install devmanager@claude-framework
+  ```
+
+  It lives in the user's Claude Code configuration, so the terminal and the editor extensions on that machine all get it. Nothing is added to any project repo, and no `.gitignore` needs a line. claude.ai chat has no plugin: nothing runs on the machine there, so it works with the connector alone.
 
 Then, in any repo with a linked DevManager project, ask for a task (`trabajá la tarea #12`) or run the `work` prompt. The session finds the project from `git remote get-url origin`.
 
