@@ -302,8 +302,9 @@ const SESSION_ID = /^[A-Za-z0-9_-]+$/;
  * `~/.claude/projects/`. An id that fails the pattern, is not found, or is found
  * in more than one folder is null: none of those says which session this is,
  * and the newest transcript would be the guess the id was there to avoid. The
- * pattern is checked before the id touches a path, so nothing outside
- * `projects/` is ever read.
+ * pattern is checked before the id touches a path, so the id cannot climb out
+ * of `projects/` or into a subfolder. A folder of `projects/` that is itself a
+ * symlink or a junction is still followed, like any other folder there.
  *
  * Without it, or with it empty, `findLatestTranscript`.
  */
