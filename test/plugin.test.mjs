@@ -720,3 +720,133 @@ describe("each message counts its last line with usage", () => {
     assert.equal(out.logTime.usageJson.bySource.main.tokensOut, 3612);
   });
 });
+
+describe("the last-line rule on transcripts that are not clean", () => {
+  /** A line of an assistant message; `usage` replaces the whole usage object when given. */
+  const line = (id, output, { model = "claude-opus-5", ...given } = {}) => ({
+    type: "assistant",
+    requestId: `req_${id}`,
+    uuid: `${id}-${output}-${model}`,
+    timestamp: "2026-09-30T12:00:00.000Z",
+    message: {
+      id,
+      model,
+      usage: "usage" in given ? given.usage : {
+        input_tokens: 2,
+        output_tokens: output,
+        cache_read_input_tokens: 100,
+        cache_creation_input_tokens: 10,
+      },
+    },
+  });
+
+  /** A transcript on disk; strings go in as raw lines, objects as JSON. */
+  function transcript(lines, dir = scratch("cf-transcript-")) {
+    const file = path.join(dir, "session.jsonl");
+    writeFileSync(file, lines.map((l) => (typeof l === "string" ? l : JSON.stringify(l))).join("\n"));
+    return file;
+  }
+
+  const COUNTERS = ["tokensIn", "tokensOut", "tokensCacheRead", "tokensCacheWrite", "messages"];
+
+  test("a corrupt line in the middle of a message is skipped, and the final line still wins", () => {
+    const usage = captureUsage(transcript([line("m1", 8), '{"type":"assistant","message":{"id":"m1","usa', line("m1", 3492)]));
+    assert.equal(usage.tokensOut, 3492);
+    assert.equal(usage.messages, 1);
+  });
+
+  test("a message whose final line is still half written counts what has arrived, and nothing is invented", () => {
+    const usage = captureUsage(transcript([line("m1", 8), '{"type":"assistant","message":{"id":"m1","usage":{"output_tokens":34']));
+    assert.equal(usage.tokensOut, 8);
+    assert.equal(usage.messages, 1);
+  });
+
+  test("the plugin survives the older truncated fixture too", () => {
+    const usage = captureUsage(path.join(FIXTURES, "transcript-truncated.jsonl"));
+    assert.equal(usage.tokensOut, 70);
+    assert.equal(usage.messages, 1);
+  });
+
+  test("a final line whose usage lacks some counters, or has them null or not numbers, sums as zero and never NaN", () => {
+    const totals = summarize([
+      line("m1", 8),
+      line("m1", 0, { usage: { output_tokens: 3492 } }),
+      line("m2", 0, { usage: { input_tokens: null, output_tokens: "40", cache_read_input_tokens: -3, cache_creation_input_tokens: NaN } }),
+    ]);
+    for (const key of COUNTERS) assert.ok(Number.isInteger(totals[key]), `${key} is ${totals[key]}`);
+    assert.equal(totals.tokensOut, 3492);
+    assert.equal(totals.tokensIn, 0);
+    assert.equal(totals.tokensCacheRead, 0);
+    assert.equal(totals.tokensCacheWrite, 0);
+    assert.equal(totals.messages, 2);
+  });
+
+  test("a final line whose usage is null or not an object does not replace the one before it", () => {
+    assert.equal(summarize([line("m1", 3492), line("m1", 0, { usage: null })]).tokensOut, 3492);
+    assert.equal(summarize([line("m1", 3492), line("m1", 0, { usage: "3492" })]).tokensOut, 3492);
+  });
+
+  test("only assistant lines count, even when another line of the same message.id carries usage", () => {
+    const totals = summarize([line("m1", 8), { ...line("m1", 99999), type: "user" }]);
+    assert.equal(totals.tokensOut, 8);
+    assert.equal(totals.messages, 1);
+  });
+
+  test("a null message.id falls back to requestId, and the last line still wins", () => {
+    const totals = summarize([
+      { ...line("x", 8), requestId: "req_1", message: { ...line("x", 8).message, id: null } },
+      { ...line("x", 500), requestId: "req_1", message: { ...line("x", 500).message, id: null } },
+    ]);
+    assert.equal(totals.tokensOut, 500);
+    assert.equal(totals.messages, 1);
+  });
+
+  test("an empty transcript, or one of blank lines, is null — on the API and on the command line", () => {
+    const empty = transcript([]);
+    assert.equal(captureUsage(empty), null);
+    assert.equal(captureUsage(transcript(["", "   ", "\r"])), null);
+    assert.equal(captureUsage(transcript(["not json", "{also not"])), null);
+
+    const result = spawnSync(process.execPath, [path.join(PLUGIN, "hooks", "capture-usage.mjs"), empty], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout), null);
+  });
+
+  test("an empty main transcript with a subagent that worked counts the subagent alone", () => {
+    const dir = scratch("cf-transcript-");
+    const main = transcript([], dir);
+    mkdirSync(path.join(dir, "session", "subagents"), { recursive: true });
+    writeFileSync(
+      path.join(dir, "session", "subagents", "agent-reviewer.jsonl"),
+      [line("r1", 8), line("r1", 3492)].map((l) => JSON.stringify(l)).join("\n"),
+    );
+    const usage = captureUsage(main);
+    assert.equal(usage.tokensOut, 3492);
+    assert.equal(usage.messages, 1);
+    assert.deepEqual(Object.keys(usage.bySource), ["agent-reviewer"]);
+  });
+
+  test("one message.id under two models is one message, attributed to its last line, and byModel adds up to the total", () => {
+    const totals = summarize([
+      line("m1", 8, { model: "claude-opus-5" }),
+      line("m1", 3492, { model: "claude-haiku-4-5-20251001" }),
+      line("m2", 50, { model: "claude-opus-5" }),
+    ]);
+    assert.equal(totals.messages, 2);
+    assert.equal(totals.tokensOut, 3542);
+    assert.equal(totals.byModel["claude-haiku-4-5-20251001"].tokensOut, 3492);
+    assert.equal(totals.byModel["claude-opus-5"].tokensOut, 50);
+    assert.equal(totals.byModel["claude-opus-5"].messages, 1);
+    for (const key of COUNTERS) {
+      const sum = Object.values(totals.byModel).reduce((acc, m) => acc + m[key], 0);
+      assert.equal(sum, totals[key], `byModel ${key} adds up to the total`);
+    }
+  });
+
+  test("the old format — every line repeating the final usage — still counts each message once", () => {
+    const totals = summarize([line("m1", 300), line("m1", 300), line("m1", 300), line("m2", 40), line("m2", 40)]);
+    assert.equal(totals.tokensOut, 340);
+    assert.equal(totals.messages, 2);
+    assert.equal(totals.tokensIn, 4);
+  });
+});
