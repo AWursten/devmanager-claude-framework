@@ -1471,6 +1471,113 @@ describe("tokens by task: each subagent counts for the task on its label", () =>
     assert.equal(usage.tokensOut, 60 + 500 + 700);
     assert.match(result.reason, /--task <n>/);
   });
+
+  test("the Stop hook with the number written as a number, 12 and not #12, counts task 12 and asks for --task 12", async () => {
+    const { root, repo, dir, task } = world();
+    writeState(dir, CURRENT_TASK, { ...task, task: 12, startedAt: START_12 });
+
+    const result = await run({
+      stdin: Readable.from([JSON.stringify({ cwd: repo, transcript_path: BATCH })]),
+      env: { DEVMANAGER_STATE_DIR: root },
+    });
+
+    assert.equal(result.block, true);
+    const usage = readState(dir, LAST_USAGE);
+    assert.equal(usage.task, 12);
+    assert.equal(usage.since, START_12);
+    assert.equal(usage.tokensOut, 860);
+    assert.deepEqual(usage.excludedSources.map((e) => e.source), ["agent-a13plan", "agent-a13rev"]);
+    assert.match(result.reason, /^Task 12 is still open/);
+    assert.match(result.reason, new RegExp(`--since ${START_12.replace(/[.]/g, "\\.")} --task 12\``));
+  });
+
+  test("the Stop hook with no task field counts by the hour, without a number, and its reason still reads", async () => {
+    const { root, repo, dir, task } = world();
+    const { task: _number, ...unnumbered } = task;
+    writeState(dir, CURRENT_TASK, { ...unnumbered, startedAt: START_12 });
+
+    const result = await run({
+      stdin: Readable.from([JSON.stringify({ cwd: repo, transcript_path: BATCH })]),
+      env: { DEVMANAGER_STATE_DIR: root },
+    });
+
+    assert.equal(result.block, true, "a task file without a number is still an open task");
+    const usage = readState(dir, LAST_USAGE);
+    assert.equal("task" in usage, false);
+    assert.equal("excludedSources" in usage, false);
+    assert.equal(usage.since, START_12);
+    assert.equal(usage.tokensOut, 60 + 500 + 700);
+    assert.match(result.reason, /^Task the open task is still open/);
+    assert.match(result.reason, new RegExp(`--since ${START_12.replace(/[.]/g, "\\.")} --task <n>\``));
+    assert.doesNotMatch(result.reason, /undefined|NaN|Task null|--task null/);
+  });
+
+  test("a subagent whose description has text but no label inherits its parent's task: text is not a label of its own", () => {
+    const file = session([
+      { id: "p12", meta: { agentType: "devmanager:implementer", description: "#12 implementer", spawnDepth: 1 }, out: 200 },
+      {
+        id: "rev",
+        meta: { agentType: "devmanager:reviewer", description: "review the diff", parentAgentId: "p12", spawnDepth: 2 },
+        out: 40,
+      },
+      { id: "p13", meta: { agentType: "devmanager:implementer", description: "#13 implementer", spawnDepth: 1 }, out: 300 },
+      {
+        id: "rev13",
+        meta: { agentType: "devmanager:reviewer", description: "review the diff", parentAgentId: "p13", spawnDepth: 2 },
+        out: 50,
+      },
+    ]);
+    const usage = captureUsage(file, { since: START_12, task: 12 });
+    assert.deepEqual(Object.keys(usage.bySource).sort(), ["agent-p12", "agent-rev", "main"]);
+    assert.equal(usage.tokensOut, 10 + 200 + 40);
+    assert.equal(usage.bySource["agent-rev"].inheritedFrom, "agent-p12");
+    assert.equal(usage.bySource["agent-rev"].description, "review the diff", "its own description, not the parent's");
+    assert.equal(usage.bySource["agent-rev"].agentType, "devmanager:reviewer");
+
+    const out = excluded(usage);
+    assert.equal(out["agent-rev13"].reason, "other-task");
+    assert.equal(out["agent-rev13"].task, 13);
+    assert.equal(out["agent-rev13"].tokensOut, 50);
+  });
+
+  test("with no subagents folder, or a file where it should be, --task counts the session alone and excludes nothing", () => {
+    const dir = scratch("cf-batch-");
+    const file = path.join(dir, "s.jsonl");
+    writeFileSync(file, lines("before", 7, "2026-09-30T12:00:00.000Z") + lines("main", 10, "2026-09-30T13:30:00.000Z"));
+
+    const check = (usage) => {
+      assert.equal(usage.task, 12);
+      assert.deepEqual(Object.keys(usage.bySource), ["main"]);
+      assert.equal(usage.tokensOut, 10);
+      assert.deepEqual(usage.excludedSources, []);
+    };
+    check(captureUsage(file, { since: START_12, task: 12 }));
+
+    const result = cli(CLI, ["--since", START_12, "--task", "12", file], cleanEnv());
+    assert.equal(result.status, 0, result.stderr);
+    check(JSON.parse(result.stdout));
+
+    mkdirSync(path.join(dir, "s"));
+    writeFileSync(path.join(dir, "s", "subagents"), "not a folder");
+    check(captureUsage(file, { since: START_12, task: 12 }));
+  });
+
+  test("with no subagents folder and nothing after the start, --task is null: there is nothing to log", () => {
+    const dir = scratch("cf-batch-");
+    const file = path.join(dir, "s.jsonl");
+    writeFileSync(file, lines("before", 7, "2026-09-30T12:00:00.000Z"));
+    assert.equal(captureUsage(file, { since: START_12, task: 12 }), null);
+
+    const result = cli(CLI, ["--since", START_12, "--task", "12", file], cleanEnv());
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout), null);
+  });
+
+  test("on the API, a task that is not a positive integer is null, not a count by the hour", () => {
+    for (const bad of [0, -3, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1, "12", "#12"]) {
+      assert.equal(captureUsage(BATCH, { since: START_12, task: bad }), null, String(bad));
+    }
+  });
 });
 
 describe("the Stop hook with a start that is not an ISO instant", () => {
