@@ -16,11 +16,13 @@
 //     `message.id` and the same `requestId`. Summing the lines therefore
 //     multiplies the real cost by two to four. Counting each message once is not
 //     an optimisation here, it is the correctness of the whole file.
-//   - Which of those lines to count matters too. Current Claude Code writes the
-//     lines as the message streams in: input and cache are the same on all of
-//     them, but the output count grows, and only the LAST line carries the
-//     final one — 8 on the first line against 3,492 on the last, in a
-//     reviewer's report. Older versions repeated the final usage on every line.
+//   - Which of those lines to count matters too. Two formats live side by side.
+//     In one, every line repeats the final usage: older versions wrote only
+//     that, and it is still what a session's main transcript shows. In the
+//     other, seen so far in subagent transcripts, the lines are written as the
+//     message streams in: input and cache are the same on all of them, but the
+//     output count grows, and only the LAST line carries the final one — 8 on
+//     the first line against 3,492 on the last, in a reviewer's report.
 //     Keeping the last line with usage is right for both.
 //   - `usage.iterations[]` breaks a request into its internal steps and repeats
 //     the same numbers; it is ignored for the same reason.
@@ -83,7 +85,9 @@ export function parseTranscript(text) {
  *
  * `since` (an ISO date) is applied line by line, before choosing: a message
  * that straddles the cut is counted from the lines after it, which include its
- * final one.
+ * final one. That holds while a message's timestamps only move forward, as in
+ * every transcript observed: if its final line fell before the cut and a
+ * partial one after it, the partial would count and the total would fall short.
  */
 export function lastUsagePerMessage(entries, { since } = {}) {
   const from = since ? Date.parse(since) : NaN;
