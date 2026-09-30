@@ -16,6 +16,7 @@ import {
   existsSync,
   writeFileSync,
   symlinkSync,
+  utimesSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -39,6 +40,7 @@ import {
   captureUsage,
   lastUsagePerMessage,
   summarize,
+  findSessionTranscript,
   main as captureMain,
 } from "../plugin/hooks/capture-usage.mjs";
 import { ensureLauncher, launcherSource, LAUNCHER } from "../plugin/hooks/session-start.mjs";
@@ -508,7 +510,7 @@ describe("finding the session's transcript from where the shell is", () => {
     const original = console.log;
     console.log = (value) => logged.push(value);
     try {
-      captureMain(["--since", "2026-08-29T00:00:00.000Z"], { cwd: path.join(repo, "src", "deep"), home });
+      captureMain(["--since", "2026-08-29T00:00:00.000Z"], { cwd: path.join(repo, "src", "deep"), home, env: {} });
     } finally {
       console.log = original;
     }
@@ -520,7 +522,7 @@ describe("finding the session's transcript from where the shell is", () => {
     const original = console.log;
     console.log = (value) => logged.push(value);
     try {
-      captureMain([], { cwd: scratch("cf-nowhere-"), home: scratch("cf-home-") });
+      captureMain([], { cwd: scratch("cf-nowhere-"), home: scratch("cf-home-"), env: {} });
     } finally {
       console.log = original;
     }
@@ -602,7 +604,7 @@ describe("the token counter stays inside the repository", () => {
     const original = console.log;
     console.log = (value) => logged.push(value);
     try {
-      captureMain([], { cwd: path.join(repo, "src"), home });
+      captureMain([], { cwd: path.join(repo, "src"), home, env: {} });
     } finally {
       console.log = original;
     }
@@ -848,5 +850,162 @@ describe("the last-line rule on transcripts that are not clean", () => {
     assert.equal(totals.tokensOut, 340);
     assert.equal(totals.messages, 2);
     assert.equal(totals.tokensIn, 4);
+  });
+});
+
+describe("the token counter reads the session it runs in", () => {
+  const OLDER = "11111111-aaaa-4bbb-8ccc-000000000001";
+  const NEWER = "22222222-aaaa-4bbb-8ccc-000000000002";
+  const SINCE = "2026-09-30T00:00:00.000Z";
+
+  /** One assistant message with `out` output tokens, as a transcript line. */
+  const message = (out) =>
+    JSON.stringify({
+      type: "assistant",
+      requestId: `req_${out}`,
+      uuid: `uuid_${out}`,
+      timestamp: "2026-09-30T12:00:00.000Z",
+      message: {
+        id: `msg_${out}`,
+        model: "claude-opus-5",
+        usage: { input_tokens: 1, output_tokens: out, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      },
+    });
+
+  /** A session filed under `startedIn` the way Claude Code files it, last written at `mtime`. */
+  function session(home, startedIn, id, out, mtime) {
+    const dir = path.join(home, ".claude", "projects", startedIn.replace(/[^a-zA-Z0-9]/g, "-"));
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${id}.jsonl`);
+    writeFileSync(file, message(out) + "\n");
+    if (mtime) utimesSync(file, mtime, mtime);
+    return file;
+  }
+
+  /** A repo with two sessions open in it; the other one wrote last. */
+  function twoSessions() {
+    const repo = scratch("cf-repo-");
+    mkdirSync(path.join(repo, ".git"));
+    const home = scratch("cf-home-");
+    const older = session(home, repo, OLDER, 111, new Date("2026-09-30T10:00:00.000Z"));
+    const newer = session(home, repo, NEWER, 222, new Date("2026-09-30T11:00:00.000Z"));
+    return { repo, home, older, newer };
+  }
+
+  function capture(argv, options) {
+    const logged = [];
+    const original = console.log;
+    console.log = (value) => logged.push(value);
+    try {
+      captureMain(argv, options);
+    } finally {
+      console.log = original;
+    }
+    return JSON.parse(logged[0]);
+  }
+
+  test("two sessions in one repo: the id picks its own, even when the other wrote last", () => {
+    const { repo, home, older } = twoSessions();
+    const env = { CLAUDE_CODE_SESSION_ID: OLDER };
+    assert.equal(findSessionTranscript({ env, home, cwd: repo }), older);
+    const out = capture(["--since", SINCE], { env, home, cwd: repo });
+    assert.equal(out.transcript, older);
+    assert.equal(out.logTime.tokensOut, 111);
+  });
+
+  test("the same two sessions without the variable: the newest, as before", () => {
+    const { repo, home, newer } = twoSessions();
+    assert.equal(findSessionTranscript({ env: {}, home, cwd: repo }), newer);
+    const out = capture(["--since", SINCE], { env: {}, home, cwd: repo });
+    assert.equal(out.transcript, newer);
+    assert.equal(out.logTime.tokensOut, 222);
+  });
+
+  test("an empty variable is the same as none", () => {
+    const { repo, home, newer } = twoSessions();
+    assert.equal(findSessionTranscript({ env: { CLAUDE_CODE_SESSION_ID: "" }, home, cwd: repo }), newer);
+  });
+
+  test("an id with no transcript is null, not the newest of the repo", () => {
+    const { repo, home } = twoSessions();
+    const env = { CLAUDE_CODE_SESSION_ID: "33333333-aaaa-4bbb-8ccc-000000000003" };
+    assert.equal(findSessionTranscript({ env, home, cwd: repo }), null);
+    assert.equal(capture([], { env, home, cwd: repo }), null);
+  });
+
+  test("an id found in two folders is null: neither says which session this is", () => {
+    const { repo, home } = twoSessions();
+    session(home, scratch("cf-elsewhere-"), OLDER, 999);
+    const env = { CLAUDE_CODE_SESSION_ID: OLDER };
+    assert.equal(findSessionTranscript({ env, home, cwd: repo }), null);
+    assert.equal(capture([], { env, home, cwd: repo }), null);
+  });
+
+  test("an id that could walk a path is null, and nothing it points at is read", () => {
+    const { repo, home } = twoSessions();
+    const projects = path.join(home, ".claude", "projects");
+    const folder = path.join(projects, repo.replace(/[^a-zA-Z0-9]/g, "-"));
+    // What each id would reach if it were joined to a path unchecked.
+    mkdirSync(path.join(folder, "a"), { recursive: true });
+    const planted = [
+      path.join(projects, "x.jsonl"), // ../x
+      path.join(home, ".claude", "x.jsonl"), // ../../x
+      path.join(folder, "a", "b.jsonl"), // a/b, and a\b on Windows
+      path.join(folder, "a\\b.jsonl"), // a\b elsewhere
+      path.join(folder, "..jsonl"), // .
+      path.join(folder, "...jsonl"), // ..
+      path.join(folder, "x.jsonl.jsonl"), // x.jsonl
+      path.join(folder, "x.jsonl"), // x.jsonl with its extension stripped
+    ];
+    for (const file of planted) writeFileSync(file, message(777) + "\n");
+    // The planting is real: a plain id reaches its file.
+    assert.equal(findSessionTranscript({ env: { CLAUDE_CODE_SESSION_ID: "x" }, home, cwd: repo }), path.join(folder, "x.jsonl"));
+
+    for (const id of ["../x", "../../x", "a/b", "a\\b", ".", "..", "x.jsonl", " ", `${OLDER}\n`]) {
+      const env = { CLAUDE_CODE_SESSION_ID: id };
+      assert.equal(findSessionTranscript({ env, home, cwd: repo }), null, JSON.stringify(id));
+      assert.equal(capture([], { env, home, cwd: repo }), null, JSON.stringify(id));
+    }
+  });
+
+  test("a session filed away from cwd: found by its id, and null without one", () => {
+    const repo = scratch("cf-repo-");
+    mkdirSync(path.join(repo, ".git"));
+    const home = scratch("cf-home-");
+    const file = session(home, scratch("cf-started-here-"), OLDER, 111);
+    assert.equal(findSessionTranscript({ env: { CLAUDE_CODE_SESSION_ID: OLDER }, home, cwd: repo }), file);
+    assert.equal(findSessionTranscript({ env: {}, home, cwd: repo }), null);
+  });
+
+  test("the id's subagents are summed in, from beside its transcript", () => {
+    const { repo, home, older } = twoSessions();
+    const subagents = path.join(path.dirname(older), OLDER, "subagents");
+    mkdirSync(subagents, { recursive: true });
+    writeFileSync(path.join(subagents, "agent-reviewer.jsonl"), message(3492) + "\n");
+    const out = capture(["--since", SINCE], { env: { CLAUDE_CODE_SESSION_ID: OLDER }, home, cwd: repo });
+    assert.equal(out.transcript, older);
+    assert.equal(out.tokensOut, 111 + 3492);
+    assert.equal(out.bySource.main.tokensOut, 111);
+    assert.equal(out.bySource["agent-reviewer"].tokensOut, 3492);
+  });
+
+  test("the launcher, as work runs it, counts the session named by the variable", () => {
+    const { repo, home, older, newer } = twoSessions();
+    const launcher = ensureLauncher({ env: { DEVMANAGER_STATE_DIR: scratch("cf-state-") } });
+    const run = (extra) => {
+      const env = { ...process.env, HOME: home, USERPROFILE: home, ...extra };
+      if (!("CLAUDE_CODE_SESSION_ID" in extra)) delete env.CLAUDE_CODE_SESSION_ID;
+      const result = spawnSync(process.execPath, [launcher, "--since", SINCE], { cwd: repo, env, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      return JSON.parse(result.stdout);
+    };
+
+    const named = run({ CLAUDE_CODE_SESSION_ID: OLDER });
+    assert.equal(named.transcript, older);
+    assert.equal(named.logTime.tokensOut, 111);
+
+    const unnamed = run({});
+    assert.equal(unnamed.transcript, newer);
+    assert.equal(unnamed.logTime.tokensOut, 222);
   });
 });

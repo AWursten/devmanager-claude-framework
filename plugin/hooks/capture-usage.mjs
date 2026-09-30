@@ -225,8 +225,17 @@ export function primaryModel(usage) {
 // The Stop hook is given `transcript_path`. `work` closing a task is not: it
 // is still mid-session. Claude Code stores transcripts under
 // `~/.claude/projects/<cwd with every non-alphanumeric run turned into ->/`,
-// so the path is derivable — but derived, not documented, so every failure here
-// returns null and the caller logs time without tokens.
+// one `<session-id>.jsonl` per session, so the path is derivable — but derived,
+// not documented, so every failure here returns null and the caller logs time
+// without tokens.
+//
+// Claude Code also sets `CLAUDE_CODE_SESSION_ID` in the shell of each session,
+// and it matches the transcript's name. When it is there it names the file, and
+// the search is by that name across every folder of `projects/`: with two
+// sessions open in one repo, the newest transcript may be the other one's. Only
+// when the variable is missing or empty does the search fall back to the newest
+// transcript near `cwd`, which is a guess and so stays inside the repo. An id
+// that is set but cannot be resolved is null, never a fallback to the guess.
 
 export function projectSlug(cwd) {
   return cwd.replace(/[^a-zA-Z0-9]/g, "-");
@@ -283,9 +292,49 @@ function latestIn(cwd, home) {
   return best?.path ?? null;
 }
 
+/** A session id as Claude Code writes it: nothing that could be a separator or a dot. */
+const SESSION_ID = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * The transcript of the session this runs in, or null.
+ *
+ * With `CLAUDE_CODE_SESSION_ID` set, the one `<id>.jsonl` under any folder of
+ * `~/.claude/projects/`. An id that fails the pattern, is not found, or is found
+ * in more than one folder is null: none of those says which session this is,
+ * and the newest transcript would be the guess the id was there to avoid. The
+ * pattern is checked before the id touches a path, so nothing outside
+ * `projects/` is ever read.
+ *
+ * Without it, or with it empty, `findLatestTranscript`.
+ */
+export function findSessionTranscript({ env = process.env, home = os.homedir(), cwd = process.cwd() } = {}) {
+  const id = env.CLAUDE_CODE_SESSION_ID;
+  if (id === undefined || id === "") return findLatestTranscript({ cwd, home });
+  if (typeof id !== "string" || !SESSION_ID.test(id)) return null;
+
+  const projects = path.join(home, ".claude", "projects");
+  let folders = [];
+  try {
+    folders = readdirSync(projects);
+  } catch {
+    return null;
+  }
+
+  const found = [];
+  for (const folder of folders) {
+    const file = path.join(projects, folder, `${id}.jsonl`);
+    try {
+      if (statSync(file).isFile()) found.push(file);
+    } catch {
+      // Not in this folder, or not a folder at all.
+    }
+  }
+  return found.length === 1 ? found[0] : null;
+}
+
 /** captureUsage against the current session's transcript, located by convention. */
 export function captureCurrentUsage(options = {}) {
-  const transcript = findLatestTranscript(options);
+  const transcript = findSessionTranscript(options);
   return transcript ? captureUsage(transcript, options) : null;
 }
 
@@ -297,15 +346,16 @@ export function captureCurrentUsage(options = {}) {
  * Exported because the `work` skill does not run this file directly: it runs
  * the launcher the SessionStart hook leaves in the state folder, which imports
  * this and calls it. The plugin's install path is not something a session knows.
+ * `options` takes `env` (by default `process.env`), `home` and `cwd`.
  */
-export function main(argv = process.argv.slice(2), options = {}) {
+export function main(argv = process.argv.slice(2), { env = process.env, ...options } = {}) {
   let since;
   let given;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--since") since = argv[++i];
     else given = argv[i];
   }
-  const usage = given ? captureUsage(given, { since }) : captureCurrentUsage({ ...options, since });
+  const usage = given ? captureUsage(given, { since }) : captureCurrentUsage({ ...options, env, since });
   const out = usage ? { ...usage, logTime: toLogTimeTokens(usage) } : null;
   console.log(JSON.stringify(out, null, 2));
   return out;
