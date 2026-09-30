@@ -35,7 +35,12 @@ import {
   findOpenTask,
   isInside,
 } from "../plugin/hooks/lib/state.mjs";
-import { captureUsage, main as captureMain } from "../plugin/hooks/capture-usage.mjs";
+import {
+  captureUsage,
+  lastUsagePerMessage,
+  summarize,
+  main as captureMain,
+} from "../plugin/hooks/capture-usage.mjs";
 import { ensureLauncher, launcherSource, LAUNCHER } from "../plugin/hooks/session-start.mjs";
 
 const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -602,5 +607,116 @@ describe("the token counter stays inside the repository", () => {
       console.log = original;
     }
     assert.equal(JSON.parse(logged[0]), null);
+  });
+});
+
+describe("each message counts its last line with usage", () => {
+  const PARTIAL = path.join(FIXTURES, "transcript-partial-output.jsonl");
+
+  /** One line of an assistant message, in the current format. */
+  const line = (id, output, { model = "claude-opus-5", requestId, uuid, at } = {}) => ({
+    type: "assistant",
+    ...(uuid && { uuid }),
+    ...(requestId && { requestId }),
+    ...(at && { timestamp: at }),
+    message: {
+      ...(id && { id }),
+      model,
+      usage: { input_tokens: 2, output_tokens: output, cache_read_input_tokens: 100, cache_creation_input_tokens: 10 },
+    },
+  });
+  /** The same line with no usage on it, as a content block can come. */
+  const bare = (id) => ({ type: "assistant", message: { id, model: "claude-opus-5", content: [] } });
+
+  test("the first line's partial output is replaced by the last line's final one", () => {
+    const usage = captureUsage(PARTIAL);
+    assert.equal(usage.tokensOut, 3492 + 120);
+    assert.equal(usage.messages, 2);
+    // Input and cache are the same on every line, so they do not change.
+    assert.equal(usage.tokensIn, 7);
+    assert.equal(usage.tokensCacheRead, 30040);
+    assert.equal(usage.tokensCacheWrite, 7010);
+  });
+
+  test("a last line without usage leaves the last one that has it", () => {
+    const totals = summarize([line("m1", 8), line("m1", 3492), bare("m1")]);
+    assert.equal(totals.tokensOut, 3492);
+    assert.equal(totals.messages, 1);
+  });
+
+  test("a line without usage in the middle does not stop the count at it", () => {
+    const totals = summarize([line("m1", 8), bare("m1"), line("m1", 3492)]);
+    assert.equal(totals.tokensOut, 3492);
+    assert.equal(totals.messages, 1);
+  });
+
+  test("without message.id, the requestId groups the lines, and the last still wins", () => {
+    const totals = summarize([
+      line(undefined, 8, { requestId: "req_1", uuid: "u1" }),
+      line(undefined, 500, { requestId: "req_1", uuid: "u2" }),
+    ]);
+    assert.equal(totals.tokensOut, 500);
+    assert.equal(totals.messages, 1);
+  });
+
+  test("lines with no key at all are summed one by one", () => {
+    const totals = summarize([line(undefined, 8), line(undefined, 500)]);
+    assert.equal(totals.tokensOut, 508);
+    assert.equal(totals.messages, 2);
+  });
+
+  test("interleaved messages each keep their own last line, in the order they started", () => {
+    const kept = lastUsagePerMessage([line("a", 8), line("b", 3), line("a", 300), line("b", 40)]);
+    assert.deepEqual(
+      kept.map((e) => [e.message.id, e.message.usage.output_tokens]),
+      [
+        ["a", 300],
+        ["b", 40],
+      ],
+    );
+    assert.equal(summarize([line("a", 8), line("b", 3), line("a", 300), line("b", 40)]).tokensOut, 340);
+  });
+
+  test("a later line with a smaller output still wins: the rule is the last line, not the highest", () => {
+    assert.equal(summarize([line("m1", 3492), line("m1", 8)]).tokensOut, 8);
+  });
+
+  test("byModel carries each model's final output", () => {
+    const { byModel } = captureUsage(PARTIAL);
+    assert.equal(byModel["claude-opus-5"].tokensOut, 3492);
+    assert.equal(byModel["claude-opus-5"].messages, 1);
+    assert.equal(byModel["claude-haiku-4-5-20251001"].tokensOut, 120);
+    assert.equal(byModel["claude-haiku-4-5-20251001"].messages, 1);
+  });
+
+  test("since: mid-message, between messages, and after everything", () => {
+    // Between the first and second lines of p1: its later lines remain, the last among them.
+    const mid = captureUsage(PARTIAL, { since: "2026-09-30T12:00:00.500Z" });
+    assert.equal(mid.tokensOut, 3492 + 120);
+    assert.equal(mid.messages, 2);
+    // After p1 ended: only p2, with its final output.
+    const between = captureUsage(PARTIAL, { since: "2026-09-30T12:00:30.000Z" });
+    assert.equal(between.tokensOut, 120);
+    assert.equal(between.messages, 1);
+    assert.equal(captureUsage(PARTIAL, { since: "2026-09-30T13:00:00.000Z" }), null);
+  });
+
+  test("a subagent's long report counts in full, under its own source", () => {
+    const usage = captureUsage(path.join(FIXTURES, "session-partial-output.jsonl"));
+    assert.equal(usage.bySource.main.tokensOut, 60);
+    assert.equal(usage.bySource["agent-reviewer"].tokensOut, 3492);
+    assert.equal(usage.tokensOut, 3552);
+    assert.equal(usage.messages, 2);
+  });
+
+  test("the command line prints the final output, in the capture and in logTime", () => {
+    const result = spawnSync(process.execPath, [path.join(PLUGIN, "hooks", "capture-usage.mjs"), PARTIAL], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const out = JSON.parse(result.stdout);
+    assert.equal(out.tokensOut, 3612);
+    assert.equal(out.logTime.tokensOut, 3612);
+    assert.equal(out.logTime.usageJson.bySource.main.tokensOut, 3612);
   });
 });

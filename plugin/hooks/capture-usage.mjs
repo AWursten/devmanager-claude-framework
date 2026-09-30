@@ -13,10 +13,15 @@
 //     under `message.usage`, with the model at `message.model`.
 //   - A single assistant message is written out ONCE PER CONTENT BLOCK — text,
 //     thinking, each tool_use — and every one of those lines repeats the same
-//     `message.id`, the same `requestId` and the same `usage` object. Summing
-//     the lines therefore multiplies the real cost by two to four. Deduplicating
-//     by `message.id` is not an optimisation here, it is the correctness of the
-//     whole file.
+//     `message.id` and the same `requestId`. Summing the lines therefore
+//     multiplies the real cost by two to four. Counting each message once is not
+//     an optimisation here, it is the correctness of the whole file.
+//   - Which of those lines to count matters too. Current Claude Code writes the
+//     lines as the message streams in: input and cache are the same on all of
+//     them, but the output count grows, and only the LAST line carries the
+//     final one — 8 on the first line against 3,492 on the last, in a
+//     reviewer's report. Older versions repeated the final usage on every line.
+//     Keeping the last line with usage is right for both.
 //   - `usage.iterations[]` breaks a request into its internal steps and repeats
 //     the same numbers; it is ignored for the same reason.
 //   - Subagent transcripts are separate files, under
@@ -71,6 +76,37 @@ export function parseTranscript(text) {
 }
 
 /**
+ * The usage lines of a transcript that count: one per message, the LAST line of
+ * it that carries usage (see the header), in the order each message first
+ * appeared. A line with no key at all cannot be matched to another, so it is
+ * kept on its own.
+ *
+ * `since` (an ISO date) is applied line by line, before choosing: a message
+ * that straddles the cut is counted from the lines after it, which include its
+ * final one.
+ */
+export function lastUsagePerMessage(entries, { since } = {}) {
+  const from = since ? Date.parse(since) : NaN;
+  const lines = new Map();
+
+  for (const entry of entries) {
+    if (entry.type !== "assistant") continue;
+    const usage = entry.message?.usage;
+    if (!usage || typeof usage !== "object") continue;
+    if (!Number.isNaN(from)) {
+      const at = Date.parse(entry.timestamp);
+      if (Number.isNaN(at) || at < from) continue;
+    }
+
+    const id = entry.message.id ?? entry.requestId ?? entry.uuid;
+    // A Map keeps the position of the first set, so overwriting keeps the order.
+    lines.set(id === undefined ? Symbol() : id, entry);
+  }
+
+  return [...lines.values()];
+}
+
+/**
  * Sum one transcript's entries. `source` labels where they came from, so a
  * caller can attribute a batch across the subagents that did the work.
  *
@@ -80,31 +116,13 @@ export function parseTranscript(text) {
  * an undercount says so, an overcount does not.
  */
 export function summarize(entries, source = "main", { since } = {}) {
-  const from = since ? Date.parse(since) : NaN;
   const totals = EMPTY();
   const byModel = {};
-  const seen = new Set();
 
-  for (const entry of entries) {
-    if (entry.type !== "assistant") continue;
-    const message = entry.message;
-    const usage = message?.usage;
-    if (!usage || typeof usage !== "object") continue;
-    if (!Number.isNaN(from)) {
-      const at = Date.parse(entry.timestamp);
-      if (Number.isNaN(at) || at < from) continue;
-    }
-
-    // See the header: one message, many lines, identical usage on each.
-    const id = message.id ?? entry.requestId ?? entry.uuid;
-    if (id !== undefined) {
-      if (seen.has(id)) continue;
-      seen.add(id);
-    }
-
+  for (const entry of lastUsagePerMessage(entries, { since })) {
+    const { usage, model } = entry.message;
     add(totals, usage);
-    const model = message.model ?? "unknown";
-    add((byModel[model] ??= EMPTY()), usage);
+    add((byModel[model ?? "unknown"] ??= EMPTY()), usage);
   }
 
   return totals.messages === 0 ? null : { ...totals, byModel, bySource: { [source]: { ...totals } } };

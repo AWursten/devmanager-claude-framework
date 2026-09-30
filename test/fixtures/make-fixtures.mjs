@@ -5,9 +5,12 @@
 //
 // The shapes here were copied from a real Claude Code transcript — in
 // particular the part that matters: one assistant message emitted as several
-// lines carrying the same message.id and the same usage object.
+// lines carrying the same message.id. The older fixtures repeat the same usage
+// on every line, as older Claude Code did, so that format stays covered. The
+// "partial" ones are written the way current Claude Code writes them: the
+// output count grows line by line and only the last line has the final one.
 
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,21 +36,26 @@ function usage({ input = 2, output = 100, cacheRead = 1000, cacheWrite = 500 }) 
   };
 }
 
-/** One assistant message, split across `blocks` lines exactly as Claude Code writes it. */
-function assistant({ id, model, blocks = 1, ...rest }) {
+/**
+ * One assistant message, split across `blocks` lines exactly as Claude Code
+ * writes it. `partial` lists the output count of each line before the last,
+ * which carries `output`; without it every line repeats the same usage.
+ * `timestamps` gives each line its own time.
+ */
+function assistant({ id, model, blocks = 1, partial, timestamps, ...rest }) {
   const shared = usage(rest);
   return Array.from({ length: blocks }, (_, i) => ({
     type: "assistant",
     uuid: `${id}-line-${i}`,
     requestId: `req_${id}`,
-    timestamp: "2026-08-29T12:00:00.000Z",
+    timestamp: timestamps?.[i] ?? "2026-08-29T12:00:00.000Z",
     message: {
       id: `msg_${id}`,
       type: "message",
       role: "assistant",
       model,
       content: [{ type: "text", text: "…" }],
-      usage: shared,
+      usage: partial && i < blocks - 1 ? usage({ ...rest, output: partial[i] }) : shared,
     },
   }));
 }
@@ -57,6 +65,7 @@ function user(text) {
 }
 
 function write(name, entries) {
+  mkdirSync(path.dirname(path.join(HERE, name)), { recursive: true });
   writeFileSync(path.join(HERE, name), entries.map((e) => `${JSON.stringify(e)}\n`).join(""));
 }
 
@@ -103,6 +112,45 @@ write("session-with-subagents/subagents/agent-implementer.jsonl", [
 write("session-with-subagents.jsonl", [
   user("/work #12"),
   ...assistant({ id: "m1", model: "claude-opus-5", blocks: 2, output: 60, input: 2, cacheRead: 500, cacheWrite: 100 }),
+]);
+
+// The current format: two models, each message streamed across lines whose
+// output grows, one second apart. The reviewer's report went 8 → 8 → 3,492.
+// Truth: in 7, out 3612, cacheRead 30040, cacheWrite 7010, 2 messages.
+write("transcript-partial-output.jsonl", [
+  user("review #12"),
+  ...assistant({
+    id: "p1",
+    model: "claude-opus-5",
+    blocks: 3,
+    partial: [8, 8],
+    output: 3492,
+    input: 2,
+    cacheRead: 30000,
+    cacheWrite: 7000,
+    timestamps: ["2026-09-30T12:00:00.000Z", "2026-09-30T12:00:01.000Z", "2026-09-30T12:00:02.000Z"],
+  }),
+  ...assistant({
+    id: "p2",
+    model: "claude-haiku-4-5-20251001",
+    blocks: 2,
+    partial: [5],
+    output: 120,
+    input: 5,
+    cacheRead: 40,
+    cacheWrite: 10,
+    timestamps: ["2026-09-30T12:01:00.000Z", "2026-09-30T12:01:01.000Z"],
+  }),
+]);
+
+// A session in the current format whose subagent writes one long report.
+// Truth: main out 60, agent-reviewer out 3492.
+write("session-partial-output/subagents/agent-reviewer.jsonl", [
+  ...assistant({ id: "r1", model: "claude-opus-5", blocks: 3, partial: [8, 8], output: 3492, input: 2, cacheRead: 900, cacheWrite: 300 }),
+]);
+write("session-partial-output.jsonl", [
+  user("/work #12"),
+  ...assistant({ id: "n1", model: "claude-opus-5", blocks: 2, partial: [10], output: 60, input: 2, cacheRead: 500, cacheWrite: 100 }),
 ]);
 
 console.log("fixtures written");
