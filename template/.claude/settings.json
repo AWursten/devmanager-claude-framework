@@ -30,7 +30,8 @@
       "mcp__devmanager__get_story",
       "mcp__devmanager__get_task",
       "mcp__devmanager__get_work_queue",
-      "mcp__devmanager__list_my_tasks"
+      "mcp__devmanager__list_my_tasks",
+      "mcp__devmanager__list_tasks"
     ],
     "ask": [
       "Bash(git push:*)",

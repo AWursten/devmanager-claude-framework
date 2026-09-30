@@ -68,7 +68,13 @@
       "mcp__devmanager__get_story",
       "mcp__devmanager__get_task",
       "mcp__devmanager__get_work_queue",
-      "mcp__devmanager__list_my_tasks"
+      "mcp__devmanager__list_my_tasks",
+      // The three above answer different questions and none of them replaces
+      // another: the queue says what to take next, list_my_tasks what is yours,
+      // and list_tasks what is simply there — the done column, someone else's
+      // work, everything under a story. The orchestrator uses the last one to
+      // resolve a batch without asking for tasks one at a time.
+      "mcp__devmanager__list_tasks"
     ],
 
     // Reversible only by a person.
