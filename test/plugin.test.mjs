@@ -1008,4 +1008,77 @@ describe("the token counter reads the session it runs in", () => {
     assert.equal(unnamed.transcript, newer);
     assert.equal(unnamed.logTime.tokensOut, 222);
   });
+
+  test("an id with no projects folder to search is null, and so is a projects that is a file", () => {
+    const repo = scratch("cf-repo-");
+    mkdirSync(path.join(repo, ".git"));
+    const env = { CLAUDE_CODE_SESSION_ID: OLDER };
+
+    const bare = scratch("cf-home-");
+    assert.equal(findSessionTranscript({ env, home: bare, cwd: repo }), null);
+    assert.equal(capture([], { env, home: bare, cwd: repo }), null);
+
+    const odd = scratch("cf-home-");
+    mkdirSync(path.join(odd, ".claude"));
+    writeFileSync(path.join(odd, ".claude", "projects"), "");
+    assert.equal(findSessionTranscript({ env, home: odd, cwd: repo }), null);
+    assert.equal(capture([], { env, home: odd, cwd: repo }), null);
+  });
+
+  test("without env, it reads the variable from process.env", () => {
+    const { repo, home, older, newer } = twoSessions();
+    const had = Object.prototype.hasOwnProperty.call(process.env, "CLAUDE_CODE_SESSION_ID");
+    const original = process.env.CLAUDE_CODE_SESSION_ID;
+    try {
+      process.env.CLAUDE_CODE_SESSION_ID = OLDER;
+      assert.equal(findSessionTranscript({ home, cwd: repo }), older);
+      delete process.env.CLAUDE_CODE_SESSION_ID;
+      assert.equal(findSessionTranscript({ home, cwd: repo }), newer);
+    } finally {
+      if (had) process.env.CLAUDE_CODE_SESSION_ID = original;
+      else delete process.env.CLAUDE_CODE_SESSION_ID;
+    }
+  });
+
+  test("a transcript given on the command line wins over the variable", () => {
+    const { repo, home, newer } = twoSessions();
+    const named = capture(["--since", SINCE, newer], { env: { CLAUDE_CODE_SESSION_ID: OLDER }, home, cwd: repo });
+    assert.equal(named.transcript, newer);
+    assert.equal(named.logTime.tokensOut, 222);
+
+    // Even an id that would resolve to null does not void the transcript it was given.
+    const unresolved = { CLAUDE_CODE_SESSION_ID: "33333333-aaaa-4bbb-8ccc-000000000003" };
+    const given = capture(["--since", SINCE, newer], { env: unresolved, home, cwd: repo });
+    assert.equal(given.transcript, newer);
+    assert.equal(given.logTime.tokensOut, 222);
+  });
+
+  test("a folder named <id>.jsonl is not a transcript, and not a second copy of one", () => {
+    const { repo, home } = twoSessions();
+    const projects = path.join(home, ".claude", "projects");
+    const ID = "44444444-aaaa-4bbb-8ccc-000000000004";
+    mkdirSync(path.join(projects, "cf-decoy", `${ID}.jsonl`), { recursive: true });
+    const env = { CLAUDE_CODE_SESSION_ID: ID };
+    assert.equal(findSessionTranscript({ env, home, cwd: repo }), null);
+    assert.equal(capture([], { env, home, cwd: repo }), null);
+
+    const real = session(home, scratch("cf-started-here-"), ID, 333);
+    assert.equal(findSessionTranscript({ env, home, cwd: repo }), real);
+  });
+
+  test("a stray file at the top of projects/ does not stop the search", () => {
+    const { repo, home, older } = twoSessions();
+    writeFileSync(path.join(home, ".claude", "projects", "stray.txt"), "");
+    assert.equal(findSessionTranscript({ env: { CLAUDE_CODE_SESSION_ID: OLDER }, home, cwd: repo }), older);
+  });
+
+  test("an id whose transcript has no usage is null, not the other session's tokens", () => {
+    const { repo, home, older } = twoSessions();
+    writeFileSync(older, "");
+    // Still the older of the two, so a fallback to the newest would find 222 tokens.
+    utimesSync(older, new Date("2026-09-30T10:00:00.000Z"), new Date("2026-09-30T10:00:00.000Z"));
+    const env = { CLAUDE_CODE_SESSION_ID: OLDER };
+    assert.equal(findSessionTranscript({ env, home, cwd: repo }), older);
+    assert.equal(capture(["--since", SINCE], { env, home, cwd: repo }), null);
+  });
 });
