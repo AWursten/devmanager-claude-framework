@@ -7,14 +7,22 @@
 // repository tries to stop with the file still there, the board is about to
 // start lying: a task sits in progress that nobody is working, with no
 // documentation check, no closing comment and no time logged. So the guard
-// captures the session's token usage (for the close to log), writes it next to
-// the task, and blocks the stop with the list of what closing still requires.
+// blocks the stop with the list of what closing still requires, and writes the
+// tokens spent since the task started next to it, in `last-usage.json` — a
+// fallback record; the close itself measures them with the launcher.
+//
+// A Stop fires at the end of EVERY turn, not only when the session ends, and a
+// turn that ends asking the person something is waiting, not leaving. So a last
+// message that ends in a question goes through without being counted.
 //
 // DECISION — loop safety. The guard honours `stop_hook_active` when the runtime
-// sends it, and on top of that limits itself: MAX_BLOCKS refusals per task,
+// sends it, and on top of that limits itself: MAX_BLOCKS refusals in a row,
 // counted in `stop-guard.json` next to the task and reset when the open task
-// changes. After that it gets out of the way. A guard that can hold a session
-// forever is worse than the state it is guarding.
+// changes or when the last refusal is older than BLOCK_WINDOW_MS — a refusal
+// half an hour ago belongs to another stretch of the work, and letting it count
+// would leave the real end of the task unguarded. Within a window, after
+// MAX_BLOCKS it gets out of the way: a guard that can hold a session forever is
+// worse than the state it is guarding.
 
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -32,6 +40,12 @@ import {
 import { captureUsage } from "./capture-usage.mjs";
 
 export const MAX_BLOCKS = 2;
+export const BLOCK_WINDOW_MS = 30 * 60 * 1000;
+
+/** Whether the turn ended asking the person something: then it is waiting, not leaving. */
+export function isWaiting(lastMessage) {
+  return typeof lastMessage === "string" && /[?？]\s*$/.test(lastMessage.trim());
+}
 
 /** Identity of the open task, so the block counter resets when a new one opens. */
 export function taskKey(currentTask) {
@@ -49,7 +63,7 @@ export function blockReason(currentTask, dir) {
     "  1. Documentation check — read the project's documents against what you built, fix what the",
     "     work made false (upsert_document), and keep the result for docs_check.",
     "  2. add_comment — what was done, decisions taken, deviations from the plan, what to verify.",
-    '  3. log_time — the minutes, and the tokens that `node ~/.claude/devmanager-state/capture-usage.mjs --since <startedAt>`',
+    `  3. log_time — the minutes, and the tokens that \`node ~/.claude/devmanager-state/capture-usage.mjs --since ${currentTask?.startedAt ?? "<startedAt>"}\``,
     '     prints under logTime (null or an error: log the time without tokens), source: "AI".',
     "  4. submit_for_review with docs_check — the state transition. Never complete_task unless the",
     "     project has no review column and the human said to close fully.",
@@ -58,8 +72,8 @@ export function blockReason(currentTask, dir) {
     "If the task cannot be finished, that is also a close: say why in a comment, log the time spent,",
     "leave the task where it belongs, and delete the state file. What is not allowed is silence.",
     "",
-    "If you are only waiting for the person's answer, or this session is not the one working that task,",
-    `say so and stop again: the guard steps aside after ${MAX_BLOCKS} refusals.`,
+    "Waiting for the person's answer? End the message with the question: a turn that asks goes through.",
+    `Not the session working that task? Say so and stop again: the guard steps aside after ${MAX_BLOCKS} refusals.`,
   ].join("\n");
 }
 
@@ -67,25 +81,44 @@ export function blockReason(currentTask, dir) {
  * The whole decision, as a pure function. `guard` is the previous
  * stop-guard.json; the returned `guard` is what should replace it.
  */
-export function decide({ currentTask, dir = null, guard, stopHookActive = false, maxBlocks = MAX_BLOCKS }) {
+export function decide({
+  currentTask,
+  dir = null,
+  guard,
+  stopHookActive = false,
+  lastMessage = null,
+  now = Date.now(),
+  maxBlocks = MAX_BLOCKS,
+}) {
   if (!currentTask) {
     return { block: false, reason: null, guard: null, why: "no open task" };
   }
 
   const key = taskKey(currentTask);
-  const blocks = guard?.taskKey === key ? Number(guard.blocks) || 0 : 0;
+  const lastBlockedAt = Date.parse(guard?.lastBlockedAt);
+  const recent = !Number.isNaN(lastBlockedAt) && now - lastBlockedAt < BLOCK_WINDOW_MS;
+  const blocks = guard?.taskKey === key && recent ? Number(guard.blocks) || 0 : 0;
+
+  if (isWaiting(lastMessage)) {
+    return { block: false, reason: null, guard: guard ?? null, why: "waiting for the person's answer" };
+  }
 
   // Honoured when the runtime provides it; the counter below is what actually
   // guarantees termination.
   if (stopHookActive) {
-    return { block: false, reason: null, guard: { taskKey: key, blocks }, why: "stop hook already active" };
+    return {
+      block: false,
+      reason: null,
+      guard: { taskKey: key, blocks, lastBlockedAt: guard?.lastBlockedAt ?? null },
+      why: "stop hook already active",
+    };
   }
 
   if (blocks >= maxBlocks) {
     return {
       block: false,
       reason: null,
-      guard: { taskKey: key, blocks },
+      guard: { taskKey: key, blocks, lastBlockedAt: guard?.lastBlockedAt ?? null },
       why: `already blocked ${blocks} time(s) for this task`,
     };
   }
@@ -93,7 +126,7 @@ export function decide({ currentTask, dir = null, guard, stopHookActive = false,
   return {
     block: true,
     reason: blockReason(currentTask, dir),
-    guard: { taskKey: key, blocks: blocks + 1, lastBlockedAt: new Date().toISOString() },
+    guard: { taskKey: key, blocks: blocks + 1, lastBlockedAt: new Date(now).toISOString() },
     why: "task still open",
   };
 }
@@ -129,6 +162,7 @@ export async function run({ stdin = process.stdin, env = process.env } = {}) {
     dir: open?.dir ?? null,
     guard: open ? readState(open.dir, STOP_GUARD) : null,
     stopHookActive: input.stop_hook_active === true,
+    lastMessage: input.last_assistant_message ?? null,
   });
 
   if (decision.guard && open) writeState(open.dir, STOP_GUARD, decision.guard);

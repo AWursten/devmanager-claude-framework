@@ -23,7 +23,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
-import { decide, output, taskKey, MAX_BLOCKS, run } from "../plugin/hooks/stop-guard.mjs";
+import { decide, output, taskKey, MAX_BLOCKS, BLOCK_WINDOW_MS, run } from "../plugin/hooks/stop-guard.mjs";
 import {
   CURRENT_TASK,
   LAST_USAGE,
@@ -254,9 +254,40 @@ describe("decide", () => {
   });
 
   test("the counter resets when a different task opens", () => {
-    const spent = { taskKey: taskKey(TASK), blocks: MAX_BLOCKS };
+    const spent = { taskKey: taskKey(TASK), blocks: MAX_BLOCKS, lastBlockedAt: new Date().toISOString() };
     assert.equal(decide({ currentTask: TASK, guard: spent }).block, false);
     assert.equal(decide({ currentTask: { ...TASK, task: "#13" }, guard: spent }).block, true);
+  });
+
+  test("a turn that ends in a question is waiting: it goes through and costs nothing", () => {
+    for (const lastMessage of ["¿Avanzo con el plan?", "Should I go ahead?  ", "¿Sigo？"]) {
+      const result = decide({ currentTask: TASK, guard: null, lastMessage });
+      assert.equal(result.block, false, lastMessage);
+      assert.equal(result.guard, null, "waiting must not burn a refusal");
+    }
+    assert.equal(decide({ currentTask: TASK, guard: null, lastMessage: "Listo, cerré." }).block, true);
+  });
+
+  test("two waits and then a real stop: the real stop is still blocked", () => {
+    let guard = null;
+    for (let i = 0; i < 2; i++) {
+      guard = decide({ currentTask: TASK, guard, lastMessage: "¿Me confirmás el enfoque?" }).guard;
+    }
+    const real = decide({ currentTask: TASK, guard, lastMessage: "Terminé por hoy." });
+    assert.equal(real.block, true);
+  });
+
+  test("refusals older than the window do not count: a later stretch of the work is guarded again", () => {
+    const now = Date.parse("2026-09-30T12:00:00.000Z");
+    const old = { taskKey: taskKey(TASK), blocks: MAX_BLOCKS, lastBlockedAt: new Date(now - BLOCK_WINDOW_MS - 1).toISOString() };
+    const fresh = { ...old, lastBlockedAt: new Date(now - 60_000).toISOString() };
+    assert.equal(decide({ currentTask: TASK, guard: old, now }).block, true);
+    assert.equal(decide({ currentTask: TASK, guard: fresh, now }).block, false);
+  });
+
+  test("the reason carries the task's own start for the token counter", () => {
+    const result = decide({ currentTask: TASK, guard: null });
+    assert.match(result.reason, new RegExp(`--since ${TASK.startedAt.replace(/[.]/g, "\\.")}`));
   });
 
   test("output uses the documented decision/reason shape", () => {
@@ -545,5 +576,31 @@ describe("session-start as Claude Code runs it", () => {
     const result = spawnStart(path.join(link, "hooks", "session-start.mjs"), root);
     assert.equal(result.status, 0);
     assert.ok(existsSync(path.join(root, LAUNCHER)), "a linked plugin must still leave the launcher");
+  });
+});
+
+describe("the token counter stays inside the repository", () => {
+  test("it does not climb past the repo root into another session's transcripts", () => {
+    const parent = scratch("cf-parent-");
+    const repo = path.join(parent, "app");
+    mkdirSync(path.join(repo, ".git"), { recursive: true });
+    const home = scratch("cf-home-");
+    // A session filed under the PARENT of the repo: someone else's.
+    const slug = parent.replace(/[^a-zA-Z0-9]/g, "-");
+    mkdirSync(path.join(home, ".claude", "projects", slug), { recursive: true });
+    writeFileSync(
+      path.join(home, ".claude", "projects", slug, "other.jsonl"),
+      readFileSync(path.join(FIXTURES, "transcript-basic.jsonl")),
+    );
+
+    const logged = [];
+    const original = console.log;
+    console.log = (value) => logged.push(value);
+    try {
+      captureMain([], { cwd: path.join(repo, "src"), home });
+    } finally {
+      console.log = original;
+    }
+    assert.equal(JSON.parse(logged[0]), null);
   });
 });

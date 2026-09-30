@@ -215,12 +215,18 @@ export function projectSlug(cwd) {
  * null. Claude Code files a session under the directory it STARTED in, and the
  * shell that runs this may have moved into a subdirectory since — so the search
  * walks up from `cwd` and stops at the nearest directory that has transcripts.
+ *
+ * It never climbs past the root of the repository it is in (the first directory
+ * with a `.git`, which a worktree also has): above that the transcripts belong
+ * to other sessions, and taking one would log someone else's tokens. Null is
+ * the honest answer there.
  */
 export function findLatestTranscript({ cwd = process.cwd(), home = os.homedir() } = {}) {
   let dir = path.resolve(cwd);
   for (;;) {
     const found = latestIn(dir, home);
     if (found) return found;
+    if (existsSync(path.join(dir, ".git"))) return null;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
