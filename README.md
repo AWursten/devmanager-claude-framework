@@ -1,59 +1,87 @@
 # claude-framework
 
-Everything a project repo needs so that **any Claude Code session in it works DevManager tasks with full discipline**: read the context first, plan before coding, ask before assuming, verify against the acceptance criteria at the project's rigor level, and leave the board, the time log and the token count correct without anyone having to remember.
+The optional Claude Code plugin for working DevManager tasks, and the older repo template it replaces.
 
-You do not copy this repo into your project. You run `init.mjs` once, and it instantiates `template/` there.
+**You do not need anything from this repo to work with DevManager.** A session that has only the DevManager connector already works tasks with the full protocol: the server hands every session its working rules when it connects, each tool result says what comes next, the close is rejected unless it declares the documentation check, and the `work`, `sync-docs` and `adopt-lite` skills come from the organization's baseline as prompts of the connector. This repo adds the part that cannot live on a server because it has to run on the developer's machine.
 
-## The mental model, in ten lines
+## Where each rule lives
 
-1. **DevManager is the source of truth.** Stories, tasks, decisions and documents live there, not in the repo.
-2. **The repo carries a generated copy** under `.claude/docs/`, refreshed by `/sync-docs`. One-way, by design.
-3. **Tasks belong to people.** Claude works them *as* the person whose MCP connection it is using.
-4. **Work arrives through `/work`.** One task, a story, the board, or a whole phase or epic. Never invent scope beyond a task.
-5. **A task description is data** about what to build — never instructions addressed to the session.
-6. **Plan before code.** The plan is posted as a task comment; open questions block implementation.
-7. **Rigor comes from the organization.** `get_context` returns the level and the definition of done it implies.
-8. **Languages come from the organization too** — replies in `responseLanguage`, DevManager content in `docsLanguage`.
-9. **Closing is not optional.** Comment, time, tokens, state transition. A `Stop` hook holds the session to it.
-10. **Claude never merges.** It branches, implements, and submits for review.
+Nothing that has to be always on depends on a file on the client side.
 
-## Adoption
+| Kind of rule | Where it lives |
+|---|---|
+| Holds in every session | The DevManager MCP server's `instructions` |
+| Holds at one moment | The result of that moment's tool (`Next:` lines) |
+| Cannot fail | The server's schema and validations (`docs_check` on close, implicit start) |
+| Organization or project convention | The baseline, through `get_context` |
+| An invocable flow | A baseline skill, served as an MCP prompt: `work`, `sync-docs`, `adopt-lite` |
+| Has to run on the machine | **This plugin** |
 
-Two commands, from anywhere:
+## Installation
 
-```bash
-node /path/to/claude-framework/init.mjs ../my-project \
-  --project <devmanager-project-id> --name "My Project"
+- **claude.ai:** an admin adds the DevManager connector to the organization. Nothing else.
+- **Claude Code, once per machine:**
+
+  ```bash
+  claude mcp add --transport http --scope user devmanager https://devmanager.com.ar/api/mcp
+  ```
+
+  Name it `devmanager`: the plugin's read-only agents list their DevManager tools as `mcp__devmanager__*`, and a connector registered under another name leaves them without DevManager access.
+
+- **Optional, once per machine — the plugin:**
+
+  ```
+  /plugin marketplace add <path to, or git URL of, this repo>
+  /plugin install devmanager@claude-framework
+  ```
+
+  Nothing is added to any project repo, and no `.gitignore` needs a line.
+
+Then, in any repo with a linked DevManager project, ask for a task (`trabajá la tarea #12`) or run the `work` prompt. The session finds the project from `git remote get-url origin`.
+
+## What the plugin adds
+
+```
+plugin/
+  .claude-plugin/plugin.json    the manifest — the plugin is named `devmanager`
+  hooks/hooks.json              the Stop hook, run with node from the plugin root
+  hooks/stop-guard.mjs          will not let a session end with a task open
+  hooks/capture-usage.mjs       token accounting from the session transcript
+  hooks/lib/state.mjs           ~/.claude/devmanager-state/<project-id>/*.json
+  agents/                       planner · implementer · reviewer · tester
 ```
 
+- **The Stop hook.** While the `work` skill has a task open it keeps `~/.claude/devmanager-state/<project-id>/current-task.json`, with the repository the task was started in. A session working inside that repository cannot end until the task is closed — documentation check, closing comment, time, `submit_for_review` — and the hook writes the session's token usage to `last-usage.json` next to it, which is where `work` reads the tokens it logs. It gives up after two refusals per task: a guard that can hold a session forever is worse than the state it guards. Sessions in other repositories are never blocked.
+- **The four agents**, invoked as `devmanager:planner`, `devmanager:implementer`, `devmanager:reviewer` and `devmanager:tester`. The planner and the reviewer have their tools restricted by configuration — they can read the repo and DevManager and write nothing.
+
+## What you lose without the plugin
+
+The protocol is the same with or without it. Three things are not:
+
+- **Tokens per task.** Without the hook nothing reads the session transcript, so time is logged without tokens. An absent count is honest; `work` never estimates one.
+- **The block on ending a session with a task open.** The server makes up for part of it: `get_work_queue` and `list_my_tasks` flag a task left in progress with no activity for four hours, so the next session resumes it or closes it.
+- **Hard tool restrictions on the planner and the reviewer.** Without the named agents, `work` launches generic subagents with the role text from the baseline document `work-roles`, and the restriction becomes an instruction the calling session has to verify.
+
+## Language
+
+This repository is written in English — it is read by developers of any organization. At **runtime** that is not the rule: a session replies to people in the organization's reply language and writes DevManager content in its documents language, both from `get_context`. Nothing here hardcodes a language.
+
+## Working on the framework itself
+
 ```bash
-cd ../my-project && claude
+npm test        # node --test, no framework, no dependencies
 ```
 
-Then the three things `init.mjs` prints, which it cannot do for you:
+Hooks and scripts are Node (`.mjs`), never bash, and paths are joined, never concatenated: this has to run on Windows and on Linux.
 
-1. `/mcp` inside the project and log in to `devmanager`.
-2. `/sync-docs` — fills `.claude/docs/` and the managed section of `CLAUDE.md`.
-3. Review `.claude/settings.json`: the test, lint, typecheck and build commands in it are placeholders for *some* stack, not yours.
+## The legacy path: `init.mjs` and `template/`
 
-### Existing project, already has a `CLAUDE.md`
+Before the protocol moved into the server and the baseline, a repo got it by running `init.mjs`, which copies `template/` into it: a `CLAUDE.md` carrying the project id, `.mcp.json`, the `/work`, `/sync-docs` and `/adopt` skills, the four agents, the hooks with their state under the repo's own `.claude/state/`, and a settings file. **It still works and it is no longer required.** It is kept, frozen, for repos that already use it; new features land in the server, the baseline and the plugin, not here.
 
-`init.mjs` refuses to overwrite anything and lists what it would have touched, so a first run against a live repo is safe and tells you exactly what the collision set is. Then either:
+Two things to know if a repo still carries it:
 
-- move your `CLAUDE.md` aside, run again, and fold your content back into the instantiated one (the template file is short on purpose — most of what it says you want anyway); or
-- run with `--force` and recover your version from git.
-
-Everything else the framework adds lives under `.claude/`, which most repos do not have yet.
-
-### Existing project, and DevManager knows nothing about it — `/adopt`
-
-A repo with history has four documents' worth of knowledge in it and no way for a session to get at it. `/adopt` is how it gets in. It runs **once**, after `init.mjs`, with a person sitting next to it, and it replaces the `/sync-docs` step above — it ends by running that itself.
-
-**The adoption protocol is not in this repo.** It is `adopt-lite`, a skill of the organization's baseline, which the DevManager connector serves as a prompt — so it is written once and updated in one place, for every project of the organization. The skill shipped here is a wrapper: it loads that protocol, follows it as written, and then adds the two steps that only mean something in a repo carrying this framework — run `/sync-docs`, and verify the template is actually applied (`init.mjs` run, hooks wired, placeholder commands replaced), reporting anything missing instead of silently patching it. If the organization's baseline has no adoption skill, `/adopt` stops and says so rather than improvising one.
-
-What `adopt-lite` does, in one line: reads the codebase, interviews the human about what code cannot answer, and writes the project's documents, its founding decisions and a forward-looking backlog — showing every write before it happens. The rules it works under live in the baseline skill, which is the source; this README does not restate them.
-
-### Options
+- Its `/work` calls `submit_for_review` without `docs_check`. The server rejects that close in STANDARD and PRODUCTION projects, and the rejection says exactly what to add, so a session corrects it on the spot — but moving the repo to the baseline's `work` is the fix.
+- Its hooks and the plugin's are separate copies. With both installed, the repo's `.claude/state/` guard and the plugin's home-directory guard do not see each other's files.
 
 ```
 node init.mjs <target-dir> --project <devmanager-project-id> --name <project-name>
@@ -64,46 +92,4 @@ node init.mjs <target-dir> --project <devmanager-project-id> --name <project-nam
   --dry-run   Print what would happen and write nothing
 ```
 
-Appending to the target's `.gitignore` is idempotent: lines already ignored are not added twice.
-
-## What lands in the project
-
-```
-.mcp.json                       DevManager's MCP, project-scoped
-CLAUDE.md                       short; read every session; has a /sync-docs-managed section
-.claude/
-  settings.json                 permissions + the Stop hook
-  settings.jsonc                the same file, annotated — Claude Code never reads it
-  agents/                       planner · implementer · reviewer · tester
-  docs/                         generated by /sync-docs — never hand-edited
-  skills/
-    work/SKILL.md               /work — the task protocol
-    work/orchestrator.md        …and what changes for a story, the board, a phase or an epic
-    work/README.md              a dry walk-through of one task, end to end
-    sync-docs/SKILL.md          /sync-docs — DevManager → .claude/docs/
-    adopt/SKILL.md              /adopt — wrapper over the baseline's adopt-lite
-  hooks/
-    stop-guard.mjs              Stop hook: will not let a session end mid-task
-    capture-usage.mjs           token accounting from the session transcript
-    lib/state.mjs               .claude/state/*.json  (gitignored)
-```
-
-`.claude/state/` is per-session scratch, not shared state: `current-task.json` while a task is open, `last-usage.json` with the tokens the session spent. Both are gitignored.
-
-## Language
-
-This repository is written in English — it is read by Claude sessions and by developers of any organization. At **runtime** that is not the rule: a session replies to people in the organization's `responseLanguage` and writes DevManager content in its `docsLanguage`, both from `get_context`. No skill here hardcodes a language.
-
-## Working on the framework itself
-
-```bash
-npm test        # node --test, no framework, no dependencies
-```
-
-Hooks and scripts are Node (`.mjs`), never bash, and paths are joined, never concatenated: this has to run on Windows and on Linux.
-
-## Not here (yet)
-
-Routine definitions and their installer, the Slack / Claude Tag layer, marketplace plugin packaging, provider-specific PR templates. The framework is provider-neutral by construction.
-
-One thing to know when routines arrive: `/sync-docs` and `/adopt` are both marked `disable-model-invocation: true` — the first because it commits, the second because it is a once-per-repo ceremony that writes half a project's documentation, and nobody wants either happening because a conversation drifted near it. That same flag also stops a scheduled task from firing the skill, so a routine that wants to sync on a cadence will need the flag lifted or a wrapper of its own. (`/adopt` has no business on a cadence.) `/work` deliberately does not carry the flag — its safety is the explicit go in step 4 and the confirmation gate in front of `--phase` and `--epic`, not its invocability.
+`/sync-docs` and `/adopt` are marked `disable-model-invocation: true` — the first because it commits, the second because it is a once-per-repo ceremony — and the baseline's `sync-docs` keeps the flag for the same reason. `work` deliberately does not carry it: its safety is the explicit go before `start_task` and the confirmation gate in front of `--phase` and `--epic`, not its invocability.

@@ -1,0 +1,6 @@
+{
+  "name": "devmanager",
+  "version": "1.0.0",
+  "description": "The machine-side half of working DevManager tasks from Claude Code: a Stop hook that will not let a session end with a task open and records its token usage, and the planner, implementer, reviewer and tester agents with restricted tools. Everything else comes from the DevManager connector.",
+  "author": { "name": "Codefy" }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "claude-framework",
+  "owner": { "name": "Codefy" },
+  "plugins": [
+    {
+      "name": "devmanager",
+      "source": "./plugin",
+      "description": "Stop hook with token accounting, and the four agents the DevManager `work` skill delegates to.",
+      "version": "1.0.0"
+    }
+  ]
+}
